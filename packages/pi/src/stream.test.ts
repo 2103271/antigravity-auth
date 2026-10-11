@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from 'bun:test'
 import * as actualCore from '@cortexkit/antigravity-auth-core'
 import {
   type Api,
@@ -117,6 +125,64 @@ function stalledSseResponse(frame: string): {
 
 function userContext(): Context {
   return { messages: [{ role: 'user', content: 'test', timestamp: 1 }] }
+}
+
+function observeCallerListeners(signal: AbortSignal) {
+  const listeners = new Set<EventListenerOrEventListenerObject>()
+  const add = signal.addEventListener.bind(signal)
+  const remove = signal.removeEventListener.bind(signal)
+  signal.addEventListener = (
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ) => {
+    if (type === 'abort' && listener) listeners.add(listener)
+    add(type, listener, options)
+  }
+  signal.removeEventListener = (
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ) => {
+    if (type === 'abort' && listener) listeners.delete(listener)
+    remove(type, listener, options)
+  }
+  return listeners
+}
+
+function httpErrorResponse(failure?: Error) {
+  const chunks = ['upstream ', 'failure']
+  let nextChunk = 0
+  let pendingPulls = 0
+  let terminal: 'EOF' | 'error' | undefined
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        pendingPulls++
+        try {
+          await Promise.resolve()
+          const chunk = chunks[nextChunk]
+          if (chunk !== undefined) {
+            nextChunk++
+            controller.enqueue(new TextEncoder().encode(chunk))
+          } else if (failure) {
+            terminal = 'error'
+            controller.error(failure)
+          } else {
+            terminal = 'EOF'
+            controller.close()
+          }
+        } finally {
+          pendingPulls--
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  return {
+    response: new Response(body, { status: 503 }),
+    state: () => ({ nextChunk, pendingPulls, terminal }),
+  }
 }
 
 async function runStream(
@@ -434,6 +500,32 @@ describe('convertGeminiToolCallPart', () => {
 })
 
 describe('streamCortexKitAntigravity', () => {
+  it('works without AbortSignal.any with a caller signal', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any')!
+    Object.defineProperty(AbortSignal, 'any', {
+      ...descriptor,
+      value: undefined,
+    })
+    try {
+      expect(AbortSignal.any).toBeUndefined()
+      const caller = new AbortController()
+      fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
+        terminalTextResponse(),
+      )
+      const { result } = await collectStream(
+        streamCortexKitAntigravity(fakeModel(), userContext(), {
+          apiKey: 'test-token',
+          sessionId: 'no-any',
+          signal: caller.signal,
+        }),
+      )
+      expect(fetchWithAgyCliTransportMock).toHaveBeenCalledTimes(1)
+      expect(result.stopReason).toBe('stop')
+    } finally {
+      Object.defineProperty(AbortSignal, 'any', descriptor)
+    }
+  })
+
   it('surfaces an embedded SSE error instead of returning an empty success', async () => {
     const { events, result } = await runStream(
       fakeModel(),
@@ -744,6 +836,297 @@ describe('streamCortexKitAntigravity', () => {
 
     expect(result.stopReason).toBe('stop')
     expect(result.content).toEqual([{ type: 'text', text: 'answer' }])
+  })
+})
+
+describe('Pi caller cancellation without AbortSignal.any', () => {
+  let anyDescriptor: PropertyDescriptor
+  beforeEach(() => {
+    anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any')!
+    Object.defineProperty(AbortSignal, 'any', {
+      ...anyDescriptor,
+      value: undefined,
+    })
+    expect(AbortSignal.any).toBeUndefined()
+  })
+  afterEach(() => Object.defineProperty(AbortSignal, 'any', anyDescriptor))
+
+  function startWithCaller(caller: AbortController) {
+    return streamCortexKitAntigravity(fakeModel(), userContext(), {
+      apiKey: 'test-token',
+      sessionId: 'caller-cancellation',
+      signal: caller.signal,
+    })
+  }
+
+  it('forwards a pre-abort through opening without attaching a caller listener', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    const reason = new Error('pre-aborted Pi request')
+    caller.abort(reason)
+    fetchWithAgyCliTransportMock.mockImplementationOnce(
+      async (_url, _init, options) => {
+        expect(options.signal.aborted).toBe(true)
+        expect(options.signal.reason).toBe(reason)
+        throw options.signal.reason
+      },
+    )
+    const { result } = await collectStream(startWithCaller(caller))
+    expect(fetchWithAgyCliTransportMock).toHaveBeenCalledTimes(1)
+    expect(result.stopReason).toBe('aborted')
+    expect(result.errorMessage).toBe(reason.message)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('forwards abort while opening and detaches after rejection', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    let opened!: () => void
+    const opening = new Promise<void>((resolve) => {
+      opened = resolve
+    })
+    let requestSignal!: AbortSignal
+    fetchWithAgyCliTransportMock.mockImplementationOnce(
+      async (_url, _init, options) => {
+        requestSignal = options.signal
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal.addEventListener(
+            'abort',
+            () => reject(requestSignal.reason),
+            { once: true },
+          )
+          opened()
+        })
+      },
+    )
+    const pending = collectStream(startWithCaller(caller))
+    await opening
+    expect(listeners.size).toBe(1)
+    const reason = new Error('Pi opening canceled')
+    caller.abort(reason)
+    const { result } = await pending
+    expect(requestSignal.reason).toBe(reason)
+    expect(result.stopReason).toBe('aborted')
+    expect(result.errorMessage).toBe(reason.message)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('forwards abort during chunk parsing and releases and detaches on cancel', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    let requestSignal!: AbortSignal
+    let response!: Response
+    fetchWithAgyCliTransportMock.mockImplementationOnce(
+      async (_url, _init, options) => {
+        requestSignal = options.signal
+        response = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}}\n\n',
+                ),
+              )
+              requestSignal.addEventListener(
+                'abort',
+                () => controller.error(requestSignal.reason),
+                { once: true },
+              )
+            },
+          }),
+        )
+        return response
+      },
+    )
+    const events = []
+    const stream = startWithCaller(caller)
+    const reason = new Error('Pi body canceled')
+    for await (const event of stream) {
+      events.push(event.type)
+      if (event.type === 'text_delta') {
+        expect(listeners.size).toBe(1)
+        caller.abort(reason)
+      }
+    }
+    const result = await stream.result()
+    expect(events).toContain('text_delta')
+    expect(events.at(-1)).toBe('error')
+    expect(requestSignal.reason).toBe(reason)
+    expect(result.stopReason).toBe('aborted')
+    expect(result.errorMessage).toBe(reason.message)
+    expect(response.body!.locked).toBe(false)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('retains forwarding through successful body cleanup and then detaches', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    let canceled!: () => void
+    const cancelStarted = new Promise<void>((resolve) => {
+      canceled = resolve
+    })
+    let finishCancel!: () => void
+    const cancelFinished = new Promise<void>((resolve) => {
+      finishCancel = resolve
+    })
+    let requestSignal!: AbortSignal
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]}}\n\n',
+            ),
+          )
+        },
+        async cancel() {
+          canceled()
+          await cancelFinished
+        },
+      }),
+    )
+    fetchWithAgyCliTransportMock.mockImplementationOnce(
+      async (_url, _init, options) => {
+        requestSignal = options.signal
+        return response
+      },
+    )
+    const pending = collectStream(startWithCaller(caller))
+    await cancelStarted
+    expect(listeners.size).toBe(1)
+    finishCancel()
+    const { result } = await pending
+    expect(result.stopReason).toBe('stop')
+    expect(response.body!.locked).toBe(false)
+    expect(listeners.size).toBe(0)
+    caller.abort(new Error('after success'))
+    expect(requestSignal.aborted).toBe(false)
+  })
+
+  it('detaches on opening, HTTP, embedded, and body-read errors', async () => {
+    const readFailure = new Error('broken SSE body')
+    for (const response of [
+      undefined,
+      new Response('unavailable', { status: 503 }),
+      sseResponse(['data: {"error":{"message":"embedded failure"}}\n\n']),
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(readFailure)
+          },
+        }),
+      ),
+    ]) {
+      const caller = new AbortController()
+      const listeners = observeCallerListeners(caller.signal)
+      fetchWithAgyCliTransportMock.mockImplementationOnce(async () => {
+        expect(listeners.size).toBe(1)
+        if (!response) throw new Error('opening failed')
+        return response
+      })
+      const { result } = await collectStream(startWithCaller(caller))
+      expect(result.stopReason).toBe('error')
+      expect(listeners.size).toBe(0)
+      if (response?.ok && response.body)
+        expect(response.body.locked).toBe(false)
+    }
+  })
+
+  it('documents the stock text consumer retaining a completed body lock', async () => {
+    const response = new Response('upstream failure', { status: 503 })
+    expect(await response.text()).toBe('upstream failure')
+    expect(response.bodyUsed).toBe(true)
+    // A consumed string-backed body can stay locked despite having no source IO.
+    expect(response.body!.locked).toBe(true)
+  })
+
+  it('preserves a fully consumed string-backed HTTP error despite its stock body lock', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    const response = new Response('upstream failure', { status: 503 })
+    const consume = spyOn(response, 'text')
+    fetchWithAgyCliTransportMock.mockImplementationOnce(async () => response)
+    const { result } = await collectStream(startWithCaller(caller))
+    expect(consume).toHaveBeenCalledTimes(1)
+    expect(result.stopReason).toBe('error')
+    expect(result.errorMessage).toBe(
+      'Antigravity request failed: HTTP 503 upstream failure',
+    )
+    expect(response.bodyUsed).toBe(true)
+    expect(response.body!.locked).toBe(true)
+    expect(listeners.size).toBe(0)
+    consume.mockRestore()
+  })
+
+  it('consumes the HTTP error body and preserves its error without a live parser or caller listener', async () => {
+    for (const failure of [undefined, new Error('HTTP body read failure')]) {
+      const stock = httpErrorResponse(failure)
+      const stockReader = spyOn(stock.response.body!, 'getReader')
+      if (failure) await expect(stock.response.text()).rejects.toBe(failure)
+      else expect(await stock.response.text()).toBe('upstream failure')
+      const caller = new AbortController()
+      const listeners = observeCallerListeners(caller.signal)
+      const source = httpErrorResponse(failure)
+      const parserReader = spyOn(source.response.body!, 'getReader')
+      let requestSignal!: AbortSignal
+      fetchWithAgyCliTransportMock.mockImplementationOnce(
+        async (_url, _init, options) => {
+          requestSignal = options.signal
+          expect(listeners.size).toBe(1)
+          return source.response
+        },
+      )
+      const { events, result } = await collectStream(startWithCaller(caller))
+      expect(events.map((event) => event.type)).toEqual(['start', 'error'])
+      expect(result.stopReason).toBe('error')
+      expect(result.errorMessage).toBe(
+        failure
+          ? 'HTTP body read failure'
+          : 'Antigravity request failed: HTTP 503 upstream failure',
+      )
+      expect(source.response.bodyUsed).toBe(true)
+      expect(source.response.body!.locked).toBe(stock.response.body!.locked)
+      expect(source.state()).toEqual({
+        nextChunk: 2,
+        pendingPulls: 0,
+        terminal: failure ? 'error' : 'EOF',
+      })
+      // Error bodies must use only Response.text()'s readers, not an extra parseGeminiSse reader.
+      expect(parserReader).toHaveBeenCalledTimes(stockReader.mock.calls.length)
+      expect(listeners.size).toBe(0)
+      expect(requestSignal.aborted).toBe(true)
+      const firstReason = requestSignal.reason
+      caller.abort(new Error('after HTTP failure'))
+      expect(requestSignal.reason).toBe(firstReason)
+      expect(listeners.size).toBe(0)
+      parserReader.mockRestore()
+      stockReader.mockRestore()
+    }
+  })
+
+  it('forwards caller cancellation into the vault opening path and detaches', async () => {
+    const caller = new AbortController()
+    const listeners = observeCallerListeners(caller.signal)
+    const reason = new Error('vault caller canceled')
+    let forwarded!: AbortSignal
+    const vaultStream = createCortexKitAntigravityVaultStream(
+      async (_dispatch, signal) => {
+        forwarded = signal!
+        expect(listeners.size).toBe(1)
+        caller.abort(reason)
+        throw forwarded.reason
+      },
+      'vault-marker',
+    )
+    const { result } = await collectStream(
+      vaultStream(fakeModel(), userContext(), {
+        apiKey: 'vault-marker',
+        signal: caller.signal,
+      }),
+    )
+    expect(forwarded.reason).toBe(reason)
+    expect(result.stopReason).toBe('aborted')
+    expect(listeners.size).toBe(0)
   })
 })
 

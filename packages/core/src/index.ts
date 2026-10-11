@@ -1,6 +1,7 @@
 // @cortexkit/antigravity-auth-core
 // Harness-agnostic core surface. Modules are migrated here in stages.
 
+export * from './abort-forwarding.ts'
 export * from './account-identity.ts'
 export type {
   AccountManagerOptions,
