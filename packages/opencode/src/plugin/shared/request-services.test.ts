@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { getEventListeners } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -629,7 +630,7 @@ describe('createRequestExecutor retry contract', () => {
         ...ANTIGRAVITY_ENDPOINT_FALLBACKS,
       ])
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -656,7 +657,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.calls).toHaveLength(2)
       expect(h.calls[1]?.url).toBe(h.calls[0]?.url as string)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -682,7 +683,7 @@ describe('createRequestExecutor retry contract', () => {
         'Bearer access-second',
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -719,7 +720,7 @@ describe('createRequestExecutor retry contract', () => {
       )
       expect(h.calls).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -755,7 +756,7 @@ describe('createRequestExecutor retry contract', () => {
         'access-kept',
       ])
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -797,7 +798,7 @@ describe('createRequestExecutor retry contract', () => {
         'access-fresh-grant',
       ])
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -843,7 +844,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.calls).toHaveLength(0)
     } finally {
       release()
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -865,7 +866,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.refreshed).toHaveLength(1)
       expect(h.calls).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -889,7 +890,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(pool.getAccounts()[0]?.parts.refreshToken).toBe('refresh-1')
       expect(h.clearStoredAuth).not.toHaveBeenCalled()
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -909,7 +910,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.clearStoredAuth).toHaveBeenCalledTimes(1)
       expect(h.calls).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -929,7 +930,7 @@ describe('createRequestExecutor retry contract', () => {
       )
       expect(h.calls).toHaveLength(ANTIGRAVITY_ENDPOINT_FALLBACKS.length)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -957,7 +958,7 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.calls).toHaveLength(1)
       expect(pool.getAccounts()[0]?.enabled).toBe(false)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
@@ -1021,7 +1022,7 @@ describe('createRequestExecutor vault admissions', () => {
       expect(h.pool.getAccounts()[0]?.access).toBeUndefined()
       expect(h.pool.getAccounts()[0]?.parts.refreshToken).toBe('refresh-0')
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1056,7 +1057,7 @@ describe('createRequestExecutor vault admissions', () => {
       expect(h.calls).toHaveLength(1)
       expect(issued).toBe(2)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
@@ -1097,7 +1098,7 @@ describe('createRequestExecutor vault 401 rotation', () => {
       ).toEqual(['Bearer token-v1', 'Bearer token-v2'])
       expect(h.calls[1]?.url).toBe(h.calls[0]?.url as string)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1126,7 +1127,7 @@ describe('createRequestExecutor vault 401 rotation', () => {
       expect(response.status).toBe(401)
       expect(h.calls).toHaveLength(1)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
@@ -1180,7 +1181,7 @@ describe('createRequestExecutor local refresh attribution', () => {
         'Bearer access-rotated',
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
@@ -1218,7 +1219,7 @@ describe('createRequestExecutor request kinds', () => {
         ).effectiveModel as string,
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1253,7 +1254,7 @@ describe('createRequestExecutor request kinds', () => {
       expect(primary.headers.get('x-antigravity-response-type')).toBeNull()
       expect(h.calls).toHaveLength(1)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1284,7 +1285,7 @@ describe('createRequestExecutor request kinds', () => {
         Number(b2?.[4]) - Number(b1?.[4]),
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
@@ -1368,7 +1369,7 @@ describe('Antigravity-owned selection policy', () => {
       expect(response.status).toBe(200)
       expect(h.calls).toHaveLength(1)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1395,7 +1396,7 @@ describe('Antigravity-owned selection policy', () => {
       expect(response.status).toBe(412)
       expect(h.calls).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1424,13 +1425,13 @@ describe('Antigravity-owned selection policy', () => {
       expect(claude.status).toBe(412)
       expect(h.calls).toHaveLength(1)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
 
 describe('createRequestExecutor per-request sender', () => {
-  it("sends through the request's own raw sender with the caller signal", async () => {
+  it("sends through the request's own raw sender with request-specific cancellation", async () => {
     const controller = new AbortController()
     const h = harness({
       respond: async () => {
@@ -1454,34 +1455,192 @@ describe('createRequestExecutor per-request sender', () => {
       expect(response.status).toBe(200)
       expect(h.calls).toHaveLength(0)
       expect(sent).toHaveLength(1)
-      expect(sent[0]?.options?.signal).toBe(controller.signal)
+      expect(sent[0]?.options?.signal).toBeInstanceOf(AbortSignal)
+      expect(sent[0]?.options?.signal?.aborted).toBe(false)
+      await response.text()
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
       expect(new URL(sent[0]?.url ?? '').origin).toBe(
         ANTIGRAVITY_ENDPOINT_FALLBACKS[0],
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })
 
 describe('createRequestExecutor cancellation and overflow', () => {
-  it('hands the caller AbortSignal object to the raw transport unchanged', async () => {
+  it('propagates the caller exact abort reason to an admitted physical send', async () => {
     const controller = new AbortController()
-    const h = harness({ respond: async () => okJson() })
+    const reason = new Error('caller cancelled the physical send')
+    let start: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      start = resolve
+    })
+    let physicalReason: unknown
+    const h = harness({
+      respond: async (call) => {
+        const signal = call.options?.signal
+        if (!signal) throw new Error('Physical send requires a signal')
+        start()
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              physicalReason = signal.reason
+              reject(signal.reason)
+            },
+            { once: true },
+          )
+        })
+      },
+    })
     const executor = createRequestExecutor(h.deps)
+    const outcome = executor
+      .execute(NON_STREAM_URL, CHAT_INIT(controller.signal))
+      .then(
+        (value) => ({ kind: 'response' as const, value }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      )
     try {
-      await executor.execute(NON_STREAM_URL, CHAT_INIT(controller.signal))
+      await started
+      controller.abort(reason)
+      expect(physicalReason).toBe(reason)
+      expect(await outcome).toEqual({ kind: 'error', error: reason })
       expect(h.calls).toHaveLength(1)
-      expect(h.calls[0]?.options?.signal).toBe(controller.signal)
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
+      await outcome
     }
   })
 
-  // An abort during the capacity wait ends that endpoint's attempt; the loop
-  // then moves to the next endpoint, whose send receives the already-aborted
-  // signal (the raw transport rejects such a send without network I/O), and
-  // the request rejects with the caller's reason.
+  it('final shutdown aborts physical I/O and waits for its cleanup', async () => {
+    const controller = new AbortController()
+    let start: () => void = () => {}
+    let release: () => void = () => {}
+    let aborted: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      start = resolve
+    })
+    const heldCleanup = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const shutdownObserved = new Promise<void>((resolve) => {
+      aborted = resolve
+    })
+    let physicalReason: unknown
+    let cleaned = false
+    const h = harness({
+      respond: async (call) => {
+        const signal = call.options?.signal
+        if (!signal) throw new Error('Physical send requires a signal')
+        start()
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              physicalReason = signal.reason
+              aborted()
+              void heldCleanup.then(() => {
+                cleaned = true
+                reject(signal.reason)
+              })
+            },
+            { once: true },
+          )
+        })
+      },
+    })
+    const executor = createRequestExecutor(h.deps)
+    const outcome = executor
+      .execute(NON_STREAM_URL, CHAT_INIT(controller.signal))
+      .then(
+        (value) => ({ kind: 'response' as const, value }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      )
+    try {
+      await started
+      let closed = false
+      const disposal = executor.dispose()
+      void disposal.then(() => {
+        closed = true
+      })
+      expect(physicalReason).toBeInstanceOf(Error)
+      await shutdownObserved
+      expect(physicalReason).toMatchObject({
+        message: 'The Antigravity request executor is disposed',
+      })
+      expect(controller.signal.aborted).toBe(false)
+      expect(cleaned).toBe(false)
+      expect(closed).toBe(false)
+      release()
+      await disposal
+      expect(cleaned).toBe(true)
+      expect(await outcome).toEqual({ kind: 'error', error: physicalReason })
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+    } finally {
+      release()
+      controller.abort(new Error('Test fixture cleanup'))
+      await executor.dispose()
+      await outcome
+    }
+  })
+
+  it('an authority transition preserves admitted physical work and refuses the next local request', async () => {
+    const controller = new AbortController()
+    let authority: 'local' | 'vault' = 'local'
+    let start: () => void = () => {}
+    let release: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      start = resolve
+    })
+    const heldSend = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const h = harness({
+      respond: async () => {
+        start()
+        await heldSend
+        return okJson()
+      },
+    })
+    const executor = createRequestExecutor({
+      ...h.deps,
+      assertAdmission: async () => {
+        if (authority !== 'local')
+          throw new Error('Local execution refused under vault custody')
+      },
+    })
+    const pending = executor.execute(
+      NON_STREAM_URL,
+      CHAT_INIT(controller.signal),
+    )
+    const outcome = pending.then(
+      (value) => ({ kind: 'response' as const, value }),
+      (error: unknown) => ({ kind: 'error' as const, error }),
+    )
+    try {
+      await started
+      authority = 'vault'
+      expect(h.calls[0]?.options?.signal?.aborted).toBe(false)
+      release()
+      const response = await pending
+      expect(response.status).toBe(200)
+      await response.text()
+      await expect(
+        executor.execute(NON_STREAM_URL, CHAT_INIT(controller.signal)),
+      ).rejects.toThrow('Local execution refused under vault custody')
+      expect(h.calls).toHaveLength(1)
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+    } finally {
+      release()
+      await executor.dispose()
+      await outcome
+    }
+  })
+
+  // Cancellation during backoff must preserve the caller's reason and
+  // prevent a later endpoint attempt from doing network I/O.
   it('rejects with the abort reason when cancelled during a retry wait', async () => {
     const controller = new AbortController()
     const reason = new Error('caller cancelled')
@@ -1512,7 +1671,7 @@ describe('createRequestExecutor cancellation and overflow', () => {
         ANTIGRAVITY_ENDPOINT_FALLBACKS.length,
       )
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1550,7 +1709,7 @@ describe('createRequestExecutor cancellation and overflow', () => {
         true,
       ])
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 
@@ -1586,7 +1745,7 @@ describe('createRequestExecutor cancellation and overflow', () => {
       expect(h.calls).toHaveLength(0)
       expect(h.refreshed).toHaveLength(0)
     } finally {
-      executor.dispose()
+      await executor.dispose()
     }
   })
 })

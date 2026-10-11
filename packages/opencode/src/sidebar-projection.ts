@@ -1,3 +1,5 @@
+import { quotaReadingParts } from './quota-presentation'
+
 /**
  * Host-neutral projection of the redacted Antigravity sidebar data into the
  * rows both TUIs draw.
@@ -21,11 +23,13 @@ export type ProjectionQuotaKey = 'gemini' | 'non-gemini'
 export interface ProjectionQuotaWindow {
   readonly window: 'weekly' | '5h'
   readonly remainingPercent: number
+  readonly checkedAt?: number
   readonly resetAt?: number
 }
 
 export interface ProjectionQuotaEntry {
   readonly remainingPercent: number
+  readonly checkedAt?: number
   readonly resetAt?: number
   readonly windows?: readonly ProjectionQuotaWindow[]
 }
@@ -61,6 +65,7 @@ export interface ProjectedQuotaRow {
   readonly label: string
   /** Remaining percent 0–100, or null when no reading is cached. */
   readonly remaining: number | null
+  readonly figure: string
   readonly tone: ProjectionTone
   /** "reset in" text, empty without a cached reset time. */
   readonly reset: string
@@ -92,11 +97,6 @@ export const QUOTA_POOL_LABELS: Readonly<Record<ProjectionQuotaKey, string>> = {
 }
 
 const POOL_ORDER: readonly ProjectionQuotaKey[] = ['gemini', 'non-gemini']
-
-const WINDOW_LABELS: Readonly<Record<string, string>> = {
-  weekly: 'wk',
-  '5h': '5h',
-}
 
 function clamp(value: number): number {
   if (!Number.isFinite(value)) return 0
@@ -149,27 +149,35 @@ function quotaRows(
     const entry = account.quota[key]
     const label = QUOTA_POOL_LABELS[key]
     if (!entry) {
-      rows.push({ label, remaining: null, tone: 'muted', reset: '' })
+      rows.push({
+        label,
+        remaining: null,
+        figure: quotaReadingParts(label, undefined, now).figure,
+        tone: 'muted',
+        reset: '',
+      })
       continue
     }
     const windows = entry.windows ?? []
     if (windows.length === 0) {
-      const remaining = clamp(entry.remainingPercent)
+      const parts = quotaReadingParts(label, entry, now)
       rows.push({
         label,
-        remaining,
-        tone: remainingTone(remaining),
-        reset: formatResetIn(entry.resetAt, now),
+        remaining: parts.remaining,
+        figure: parts.figure,
+        tone: remainingTone(parts.remaining),
+        reset: parts.detail,
       })
       continue
     }
     for (const window of windows) {
-      const remaining = clamp(window.remainingPercent)
+      const parts = quotaReadingParts(label, window, now)
       rows.push({
-        label: `${label} ${WINDOW_LABELS[window.window] ?? window.window}`,
-        remaining,
-        tone: remainingTone(remaining),
-        reset: formatResetIn(window.resetAt, now),
+        label: `${label} ${parts.name}`,
+        remaining: parts.remaining,
+        figure: parts.figure,
+        tone: remainingTone(parts.remaining),
+        reset: parts.detail,
       })
     }
   }

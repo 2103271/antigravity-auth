@@ -240,6 +240,7 @@ function projectAction(action) {
         ...(action.description !== undefined
             ? { description: action.description }
             : {}),
+        ...(action.group !== undefined ? { group: String(action.group) } : {}),
         knobs: (action.knobs ?? []).map(projectKnob),
         ...(confirm ? { confirm } : {}),
     };
@@ -259,6 +260,8 @@ function projectItem(item) {
         id: item.id,
         label: item.label,
         ...(item.detail !== undefined ? { detail: item.detail } : {}),
+        ...(item.group !== undefined ? { group: String(item.group) } : {}),
+        ...(item.status !== undefined ? { status: String(item.status) } : {}),
         ...(item.account ? { account: projectAccount(item.account) } : {}),
         ...(item.facts !== undefined ? { facts: item.facts } : {}),
         actions: (item.actions ?? []).map(projectAction),

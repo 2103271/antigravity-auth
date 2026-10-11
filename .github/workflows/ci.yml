@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'verify/**']
   pull_request:
     branches: [main]
 
@@ -34,7 +34,7 @@ jobs:
 
       - name: Install private TUI compiler from locked repository input
         run: |
-          test -f tools/common-auth-build/inputs/cortexkit-common-auth-0.12.0.tgz
+          test -f tools/common-auth-build/inputs/cortexkit-common-auth-0.14.1.tgz
           bun install --cwd tools/common-auth-build --frozen-lockfile --ignore-scripts
           bun run embed:check
 
@@ -112,7 +112,7 @@ jobs:
 
       - name: Install private TUI compiler from locked repository input
         run: |
-          test -f tools/common-auth-build/inputs/cortexkit-common-auth-0.12.0.tgz
+          test -f tools/common-auth-build/inputs/cortexkit-common-auth-0.14.1.tgz
           bun install --cwd tools/common-auth-build --frozen-lockfile --ignore-scripts
           bun run embed:check
 

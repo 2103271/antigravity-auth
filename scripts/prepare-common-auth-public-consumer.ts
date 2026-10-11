@@ -165,6 +165,9 @@ export async function runPublicConsumerCommand(
       LC_ALL: 'C',
       TZ: 'UTC',
       NO_COLOR: '1',
+      ...(process.env.AGY_TRACE_SIDEBAR_WINDOWS === '1'
+        ? { AGY_TRACE_SIDEBAR_WINDOWS: '1' }
+        : {}),
     }
     child = spawn(command === 'bun' ? process.execPath : command, args, {
       cwd: process.cwd(),

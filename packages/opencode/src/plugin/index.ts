@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import {
   type AccountRepository,
@@ -6,6 +6,7 @@ import {
   type CommonAuthCommandsModule,
   loadCommonAuthCommands,
   type RowRef,
+  VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
 
 /** The `/antigravity` menu, as the shared core factory builds it. */
@@ -18,10 +19,13 @@ import { drainNotifications, pushNotification } from '../rpc/notifications'
 import { getRpcDir } from '../rpc/rpc-dir'
 import { startRpcServer } from '../rpc/rpc-server'
 import {
+  buildSidebarMachineStateFromAccounts,
   drainSidebarWrites,
   getSidebarStateFile,
   isAccountCurrent,
+  setSidebarMachineState,
   toCapturedTier,
+  upsertSidebarActiveRouting,
 } from '../sidebar-state'
 import {
   createAccountAccessService,
@@ -42,8 +46,8 @@ import {
   ANTIGRAVITY_MENU_COMMAND,
   createAccountTargets,
   createAntigravityCommandExecuteBefore,
-  createCustodyAwareRequestPath,
   createOpenCodeAntigravityMenu,
+  createOpenCodeVaultAntigravityMenu,
   menuInvocation,
 } from './commands'
 import { initRuntimeConfig, loadConfig } from './config'
@@ -76,13 +80,27 @@ import {
 import {
   createOpenCodeQuotaManager,
   createStoreQuotaService,
+  fetchVaultAccountQuota,
   makeTierLoader,
   type QuotaManager,
   type StoreQuotaService,
 } from './quota'
 import { createSessionRecoveryHook } from './recovery'
-import { initHealthTracker, initTokenTracker } from './rotation'
+import {
+  getHealthTracker,
+  initHealthTracker,
+  initTokenTracker,
+} from './rotation'
 import { AgySessionRegistry } from './session-context'
+import type { RequestRoutingEntry } from './shared/request-services'
+import { createSourceSidebarPublisher } from './shared/source-sidebar'
+import { createVaultAccountMenuSections } from './shared/vault-menu'
+import {
+  checkVaultQuota,
+  createVaultAccountPool,
+  type VaultAccountPool,
+  vaultAccountRowKey,
+} from './shared/vault-request-credentials'
 import {
   clearAccounts,
   getStoragePath,
@@ -178,6 +196,7 @@ export const createAntigravityPlugin =
 
     const sessionRegistry = new AgySessionRegistry(directory)
     let cachedGetAuth: GetAuth | null = null
+    let stopSidebarPublisher: (() => Promise<void>) | undefined
     const lifecycle = createPluginLifecycle({
       sessionRegistry,
       shutdownDiskSignatureCache,
@@ -187,8 +206,52 @@ export const createAntigravityPlugin =
       // Drain pending sidebar writes BEFORE tearing down the RPC server
       // and file logger — a fetch-interceptor routing upsert enqueued at
       // shutdown must land before the host closes the terminal.
-      drainSidebarWrites,
+      drainSidebarWrites: async () => {
+        await stopSidebarPublisher?.()
+        await drainSidebarWrites()
+      },
     })
+    // Store vault enrollment and account-source settings beside the shared pool.
+    // Vault requests obtain credentials from Claustrum, never OpenCode's Google login.
+    const vaultCustody = createOpenCodeVaultCustody({
+      accountFile: resolve(getStoragePath()),
+      readHostSlot: async () => {
+        if (!cachedGetAuth)
+          throw new Error('OpenCode has not provided its sign-in yet')
+        return cachedGetAuth()
+      },
+      // The request executor reports failed bearer authorization to Claustrum,
+      // which decides whether its served credential needs replacement.
+      reporterSource: 'direct',
+      onAuthorityChanged: () => scheduleSidebarPublication(),
+      onRosterChanged: () => scheduleSidebarPublication(),
+    })
+    let vaultPool:
+      | {
+          source: Awaited<ReturnType<typeof vaultCustody.custodySource>>
+          pool: VaultAccountPool
+        }
+      | undefined
+    const currentVaultPool = async () => {
+      const source = await vaultCustody.custodySource()
+      if (vaultPool && vaultPool.source === source) return vaultPool
+      vaultPool = {
+        source,
+        pool: createVaultAccountPool({
+          source,
+          durable: { source, readState: () => vaultCustody.readState() },
+        }),
+      }
+      return vaultPool
+    }
+    const readAuthority = async () => {
+      const mode = await vaultCustody.readMode()
+      return !mode.ok
+        ? ('unreadable' as const)
+        : mode.record.mode === 'custody'
+          ? ('vault' as const)
+          : ('local' as const)
+    }
     const quotaManager = createOpenCodeQuotaManager(client, providerId, {
       // Route quota fetches through the injected transport so e2e and
       // custom-host deployments stay on the loopback/mock server for both
@@ -196,10 +259,17 @@ export const createAntigravityPlugin =
       // poller always hits the production Antigravity endpoint even when
       // the caller injected a mock transport.
       fetchVia: dependencies.agyTransport,
-      // Bind to the live AccountManager so every refresh (manual or
+      mayRun: async () => (await readAuthority()) === 'local',
+      fetchStoreAccountQuota: async (account, request) => {
+        const service = await currentStoreQuota()
+        if (!service)
+          throw new Error('The current store quota service is unavailable')
+        return service.fetchAccountQuota(account, request)
+      }, // Bind to the live AccountManager so every refresh (manual or
       // background) pushes the freshly-updated quota percentages into the
       // sidebar without an extra RPC. The wrapper reads lazily so the
       // AccountManager reference stays stable across reloads.
+      publishSidebar: () => sidebarPublisher.publish(),
       getAccountsForSidebar: () => {
         const manager = lifecycle.getAccountManager()
         if (!manager) return null
@@ -211,6 +281,7 @@ export const createAntigravityPlugin =
           current: isAccountCurrent(entry.index, activeByFamily),
           coolingDownUntil: entry.coolingDownUntil,
           cachedQuota: entry.cachedQuota,
+          cachedQuotaUpdatedAt: entry.cachedQuotaUpdatedAt,
           // Carry the identity stamp so the sidebar projection can
           // detect a stale snapshot that landed on the wrong account
           // after an index shift (see `redactAccountForSidebar`).
@@ -225,6 +296,100 @@ export const createAntigravityPlugin =
         return manager.getActiveIndexByFamily()
       },
     })
+    const sidebarPublisher = createSourceSidebarPublisher({
+      readAuthority,
+      local: async () => {
+        const manager = lifecycle.getAccountManager()
+        const active = manager?.getActiveIndexByFamily()
+        return buildSidebarMachineStateFromAccounts(
+          manager?.getAccounts().map((entry) => ({
+            index: entry.index,
+            enabled: entry.enabled,
+            current: active ? isAccountCurrent(entry.index, active) : false,
+            coolingDownUntil: entry.coolingDownUntil,
+            healthScore: getHealthTracker().getScore(entry.index),
+            cachedQuota: entry.cachedQuota,
+            cachedQuotaUpdatedAt: entry.cachedQuotaUpdatedAt,
+            cachedQuotaAccountId: entry.cachedQuotaAccountId,
+            currentQuotaAccountId: quotaAccountIdentity(
+              entry.parts.refreshToken,
+            ),
+            tier: toCapturedTier(entry),
+          })) ?? [],
+        )
+      },
+      vault: async () => {
+        const { pool } = await currentVaultPool()
+        await pool.sync()
+        const projection = buildSidebarMachineStateFromAccounts(
+          pool.selector.rows.map((entry) => ({
+            index: entry.index,
+            enabled: entry.enabled,
+            current: false,
+            coolingDownUntil: entry.coolingDownUntil,
+            healthScore: pool.selector.healthTracker.getScore(entry.index),
+            cachedQuota: entry.cachedQuota,
+            cachedQuotaUpdatedAt: entry.cachedQuotaUpdatedAt,
+          })),
+        )
+        return {
+          ...projection,
+          accounts: projection.accounts.map((account) => ({
+            ...account,
+            id: `vault-${account.id}`,
+          })),
+          ...(projection.accounts.length === 0
+            ? { lastError: VAULT_ACCOUNT_REMEDY }
+            : {}),
+        }
+      },
+      write: (state, ids) =>
+        setSidebarMachineState(state, { retainRoutingForAccountIds: ids }),
+    })
+    function scheduleSidebarPublication(): void {
+      void sidebarPublisher.publish().catch((error) =>
+        logger.debug('sidebar-source-publish-failed', {
+          error: error instanceof Error ? error.name : 'unknown',
+        }),
+      )
+    }
+    const routingWrites = new Set<Promise<void>>()
+    let routingClosed = false
+    stopSidebarPublisher = async () => {
+      routingClosed = true
+      await Promise.allSettled([...routingWrites])
+      await sidebarPublisher.dispose()
+      await vaultCustody.dispose()
+    }
+    const publishRouting =
+      (source: 'local' | 'vault') =>
+      (sessionId: string, entry: RequestRoutingEntry): void => {
+        if (routingClosed) return
+        const writing = (async () => {
+          await sidebarPublisher.publish()
+          if ((await readAuthority()) !== source) return
+          await upsertSidebarActiveRouting(
+            sessionId,
+            {
+              ...entry,
+              accountId:
+                source === 'vault'
+                  ? `vault-${entry.accountId}`
+                  : entry.accountId,
+            },
+            {
+              authoritative: true,
+              onlyForProjectedAccounts: true,
+            },
+          )
+        })().catch((error) =>
+          logger.debug('sidebar-routing-publish-failed', {
+            error: error instanceof Error ? error.name : 'unknown',
+          }),
+        )
+        routingWrites.add(writing)
+        void writing.finally(() => routingWrites.delete(writing))
+      }
     // Producer phase: the quota manager emits fire-and-forget sidebar
     // writes after every refresh. Its dispose() awaits any in-flight
     // refresh, so disposing it BEFORE the sidebar drain guarantees the
@@ -239,6 +404,8 @@ export const createAntigravityPlugin =
     // guaranteeing any final poll write lands before the drain flushes.
     if (config.background_quota_refresh) {
       const poller = new BackgroundQuotaRefresh({
+        publishSidebar: () => sidebarPublisher.publish(),
+        mayRun: async () => (await readAuthority()) === 'local',
         intervalMs: config.background_quota_refresh_interval_minutes * 60_000,
         sidebarStateFile: getSidebarStateFile(),
         getAccountManager: () => lifecycle.getAccountManager(),
@@ -246,7 +413,18 @@ export const createAntigravityPlugin =
         // Resolve plan tier for accounts with stale capturedTierAt. Uses
         // the same token-refresh path as the quota manager without a separate
         // network seam -- tier is best-effort metadata, not quota.
-        loadAccountTier: makeTierLoader(client, providerId),
+        loadAccountTier: makeTierLoader(client, providerId, {
+          mayRun: async () => (await readAuthority()) === 'local',
+          authorizeStore: async (account) => {
+            const service = await currentStoreQuota()
+            return service
+              ? service.authorizeLocalCheck(account)
+              : {
+                  status: 'refused',
+                  reason: 'The current store quota service is unavailable',
+                }
+          },
+        }),
         // Thread the injected clock so e2e tests can control startup
         // jitter and timing without needing a real 30-second wait.
         now: dependencies.clock.now,
@@ -299,17 +477,24 @@ export const createAntigravityPlugin =
       readonly manager: unknown
       readonly service: StoreQuotaService
     } | null = null
-    const checkStoreQuota = async (
-      repository: AccountRepository,
-      refs: readonly RowRef[],
-    ): Promise<AntigravityQuotaCheckReport> => {
+    const currentStoreQuota = async (
+      knownRepository?: AccountRepository,
+    ): Promise<StoreQuotaService | null> => {
       const manager = lifecycle.getAccountManager()
-      if (manager === null) return { checked: 0, notChecked: refs.length }
+      if (manager === null) return null
+      const opening = knownRepository
+        ? undefined
+        : await authLoader.accountStore()
+      const repository =
+        knownRepository ??
+        (opening?.status === 'ready' ? opening.repository : undefined)
+      if (!repository) return null
       if (storeQuota?.manager !== manager) {
         const previous = storeQuota
         storeQuota = {
           manager,
           service: createStoreQuotaService({
+            mayRun: async () => (await readAuthority()) === 'local',
             manager,
             repository,
             logger: createLogger('store-quota'),
@@ -317,7 +502,16 @@ export const createAntigravityPlugin =
         }
         await previous?.service.dispose()
       }
-      return storeQuota.service.checkStoreQuota(refs)
+      return storeQuota.service
+    }
+    const checkStoreQuota = async (
+      repository: AccountRepository,
+      refs: readonly RowRef[],
+    ): Promise<AntigravityQuotaCheckReport> => {
+      const service = await currentStoreQuota(repository)
+      return service
+        ? service.checkStoreQuota(refs)
+        : { checked: 0, notChecked: refs.length }
     }
     lifecycle.register(
       {
@@ -329,21 +523,6 @@ export const createAntigravityPlugin =
       },
       'producer',
     )
-    // OpenCode vault custody setup, beside the resolved account file. The
-    // host slot is OpenCode's own stored sign-in for this provider, read
-    // through the auth loader's host accessor; before the loader has run it
-    // cannot be read, which refuses custody rather than reading as empty.
-    const vaultCustody = createOpenCodeVaultCustody({
-      accountFile: resolve(getStoragePath()),
-      readHostSlot: async () => {
-        if (!cachedGetAuth)
-          throw new Error('OpenCode has not provided its sign-in yet')
-        return cachedGetAuth()
-      },
-      // The engine reads each send's HTTP status itself.
-      reporterSource: 'direct',
-    })
-    lifecycle.register({ dispose: () => vaultCustody.dispose() })
     // The `/antigravity` menu is built once per account-store repository,
     // on the same common-auth commands module whose request parser the RPC
     // server uses, so a request is parsed and applied by one module instance.
@@ -352,10 +531,87 @@ export const createAntigravityPlugin =
       readonly repository: AccountRepository
       readonly menu: Promise<CommandMenu>
     } | null = null
+    let builtVaultMenu:
+      | { pool: VaultAccountPool; menu: Promise<CommandMenu> }
+      | undefined
+    const vaultSelectors = new Map<string, string>()
+    let unavailableVaultMenu: Promise<CommandMenu> | undefined
+    const showUnavailableVaultMenu = async () => {
+      unavailableVaultMenu ??= createOpenCodeVaultAntigravityMenu({
+        commands: commandsModule,
+        settings: operatorSettings,
+        dump: {
+          isEnabled: isGeminiDumpEnabled,
+          setEnabled: setGeminiDumpEnabled,
+        },
+        applyLogLevel: setRuntimeLogLevel,
+        vault: vaultCustody.menuSection(),
+        sections: {
+          accounts: {
+            title: 'Accounts',
+            build: () => ({ lines: [VAULT_ACCOUNT_REMEDY] }),
+          },
+          quota: { title: 'Quota', build: () => ({}) },
+        },
+      })
+      return { kind: 'menu' as const, menu: await unavailableVaultMenu }
+    }
     const currentMenu = async (): Promise<
       | { kind: 'menu'; menu: CommandMenu }
       | { kind: 'unavailable'; message: string }
     > => {
+      const authority = await readAuthority()
+      if (authority !== 'local') {
+        if (authority !== 'vault') return showUnavailableVaultMenu()
+        let current: Awaited<ReturnType<typeof currentVaultPool>>
+        try {
+          current = await currentVaultPool()
+          await current.pool.sync()
+        } catch {
+          return showUnavailableVaultMenu()
+        }
+        const { source, pool } = current
+        if (builtVaultMenu?.pool !== pool) {
+          builtVaultMenu = {
+            pool,
+            menu: createOpenCodeVaultAntigravityMenu({
+              commands: commandsModule,
+              settings: operatorSettings,
+              dump: {
+                isEnabled: isGeminiDumpEnabled,
+                setEnabled: setGeminiDumpEnabled,
+              },
+              applyLogLevel: setRuntimeLogLevel,
+              vault: vaultCustody.menuSection(),
+              sections: createVaultAccountMenuSections(
+                pool,
+                (row) => {
+                  const key = vaultAccountRowKey(row)
+                  const existing = vaultSelectors.get(key)
+                  if (existing) return existing
+                  const selector = randomUUID()
+                  vaultSelectors.set(key, selector)
+                  return selector
+                },
+                (signal) =>
+                  checkVaultQuota({
+                    pool,
+                    signal,
+                    fetchReading: (ref, check) =>
+                      fetchVaultAccountQuota({
+                        source,
+                        ref,
+                        signal: check,
+                        logger,
+                        transport: dependencies.fetchImpl,
+                      }),
+                  }),
+              ),
+            }),
+          }
+        }
+        return { kind: 'menu', menu: await builtVaultMenu.menu }
+      }
       const opening = await authLoader.accountStore()
       if (opening.status !== 'ready') {
         return {
@@ -409,6 +665,7 @@ export const createAntigravityPlugin =
       },
     })
     const googleSearchTool = createGoogleSearchTool({
+      mayStartLocalWork: async () => (await readAuthority()) === 'local',
       getAuth: async () => (cachedGetAuth ? cachedGetAuth() : null),
       client,
       providerId,
@@ -484,6 +741,26 @@ export const createAntigravityPlugin =
       },
     })
     const authLoader = createAuthLoader({
+      publishSidebar: () => sidebarPublisher.publish(),
+      readAuthority,
+      createVaultFetch: async () => {
+        const { source, pool } = await currentVaultPool()
+        return createVaultFetchInterceptor({
+          assertAdmission: async () => {
+            if ((await readAuthority()) !== 'vault')
+              throw new Error(VAULT_ACCOUNT_REMEDY)
+          },
+          client,
+          config,
+          agySessionRegistry: sessionRegistry,
+          operatorSettings,
+          agyTransport: dependencies.agyTransport,
+          fetchImpl: dependencies.fetchImpl,
+          source,
+          pool,
+          onRouting: publishRouting('vault'),
+        })
+      },
       client,
       providerId,
       config,
@@ -491,37 +768,27 @@ export const createAntigravityPlugin =
       onGetAuth: (getAuth) => {
         cachedGetAuth = getAuth
       },
-      // The vault mode file decides, per request, whether the local accounts
-      // or the vault's serve; switching in the Vault section takes effect on
-      // the next request.
+      // Approved vault enrollment excludes the local account pool on every
+      // request. Only a readable, unenrolled state permits a local runtime.
       createFetch: ({ accountManager, getAuth, source }) =>
-        createCustodyAwareRequestPath({
-          readMode: () => vaultCustody.readMode(),
-          custodySource: () => vaultCustody.custodySource(),
-          local: createFetchInterceptor({
-            client,
-            directory,
-            providerId,
-            config,
-            accountManager,
-            accountSource: source,
-            quotaManager,
-            getAuth,
-            agySessionRegistry: sessionRegistry,
-            operatorSettings,
-            agyTransport: dependencies.agyTransport,
-            fetchImpl: dependencies.fetchImpl,
-          }),
-          vault: (custodySource) =>
-            createVaultFetchInterceptor({
-              client,
-              config,
-              agySessionRegistry: sessionRegistry,
-              operatorSettings,
-              agyTransport: dependencies.agyTransport,
-              fetchImpl: dependencies.fetchImpl,
-              source: custodySource,
-            }),
+        createFetchInterceptor({
+          assertAdmission: async () => {
+            if ((await readAuthority()) !== 'local')
+              throw new Error(VAULT_ACCOUNT_REMEDY)
+          },
+          client,
+          directory,
+          providerId,
+          config,
+          accountManager,
+          accountSource: source,
+          onRouting: publishRouting('local'),
+          quotaManager,
+          getAuth,
+          agySessionRegistry: sessionRegistry,
+          operatorSettings,
+          agyTransport: dependencies.agyTransport,
+          fetchImpl: dependencies.fetchImpl,
         }),
     })
     const accountOAuth = createAccountCommandOAuthService({
@@ -589,6 +856,7 @@ export const createAntigravityPlugin =
     })
     lifecycle.register({ dispose: () => accountOAuth.dispose() })
     const oauthMethods = createOAuthMethods({
+      mayStartLocalWork: async () => (await readAuthority()) === 'local',
       client,
       providerId,
       config,
@@ -611,7 +879,8 @@ export const createAntigravityPlugin =
         // The menu wrote to the account store; bring the routing manager up
         // to date with it so the next request sees the change.
         try {
-          await lifecycle.getAccountManager()?.refreshFromRepository()
+          if ((await readAuthority()) === 'local')
+            await lifecycle.getAccountManager()?.refreshFromRepository()
         } catch (error) {
           logger.warn('menu-routing-refresh-failed', { error: String(error) })
           pushNotification(
@@ -634,6 +903,12 @@ export const createAntigravityPlugin =
     // Flush the debug log stream after the sidebar drain so the last
     // buffered lines land on disk before the process exits. Best-effort.
     lifecycle.register({ dispose: () => closeDebugLog().catch(() => {}) })
+    try {
+      await vaultCustody.startObservation()
+    } catch (error) {
+      await lifecycle.dispose()
+      throw error
+    }
 
     return {
       dispose: async () => {

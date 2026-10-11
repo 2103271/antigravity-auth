@@ -134,16 +134,36 @@ describe('windows rework — reviewer frames', () => {
               remainingPercent: 92,
               resetAt: future2,
               windows: [
-                { window: '5h', remainingPercent: 99, resetAt: future },
-                { window: 'weekly', remainingPercent: 92, resetAt: future2 },
+                {
+                  window: '5h',
+                  remainingPercent: 99,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
+                {
+                  window: 'weekly',
+                  remainingPercent: 92,
+                  resetAt: future2,
+                  checkedAt: Date.now(),
+                },
               ],
             },
             'non-gemini': {
               remainingPercent: 96,
               resetAt: future2,
               windows: [
-                { window: '5h', remainingPercent: 96, resetAt: future },
-                { window: 'weekly', remainingPercent: 99, resetAt: future2 },
+                {
+                  window: '5h',
+                  remainingPercent: 96,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
+                {
+                  window: 'weekly',
+                  remainingPercent: 99,
+                  resetAt: future2,
+                  checkedAt: Date.now(),
+                },
               ],
             },
           },
@@ -195,13 +215,23 @@ describe('windows rework — reviewer frames', () => {
               remainingPercent: 89,
               resetAt: future,
               windows: [
-                { window: 'weekly', remainingPercent: 89, resetAt: future },
+                {
+                  window: 'weekly',
+                  remainingPercent: 89,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
               ],
             },
             'non-gemini': {
               remainingPercent: 100,
               windows: [
-                { window: 'weekly', remainingPercent: 100, resetAt: future },
+                {
+                  window: 'weekly',
+                  remainingPercent: 100,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
               ],
             },
           },
@@ -229,7 +259,7 @@ describe('windows rework — reviewer frames', () => {
     testSetup.renderer.destroy()
   })
 
-  it('(c) Collapsed row — pool + binding-window label + used%', async () => {
+  it('(c) Collapsed row — pool + binding-window label + percent left', async () => {
     const future = Date.now() + 5 * 60 * 1000
     const future2 = Date.now() + 7 * 24 * 60 * 60 * 1000
     const payload = writeState({
@@ -247,16 +277,36 @@ describe('windows rework — reviewer frames', () => {
               remainingPercent: 92,
               resetAt: future2,
               windows: [
-                { window: 'weekly', remainingPercent: 92, resetAt: future2 },
-                { window: '5h', remainingPercent: 99, resetAt: future },
+                {
+                  window: 'weekly',
+                  remainingPercent: 92,
+                  resetAt: future2,
+                  checkedAt: Date.now(),
+                },
+                {
+                  window: '5h',
+                  remainingPercent: 99,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
               ],
             },
             'non-gemini': {
               remainingPercent: 96,
               resetAt: future2,
               windows: [
-                { window: 'weekly', remainingPercent: 99, resetAt: future2 },
-                { window: '5h', remainingPercent: 96, resetAt: future },
+                {
+                  window: 'weekly',
+                  remainingPercent: 99,
+                  resetAt: future2,
+                  checkedAt: Date.now(),
+                },
+                {
+                  window: '5h',
+                  remainingPercent: 96,
+                  resetAt: future,
+                  checkedAt: Date.now(),
+                },
               ],
             },
           },
@@ -285,12 +335,12 @@ describe('windows rework — reviewer frames', () => {
     await testSetup.flush()
     const frame = testSetup.captureCharFrame()
     console.log(`\n${dumpFrame('(c) Collapsed row frame', frame)}`)
-    // Collapsed row should show binding-window label + used% per pool.
-    expect(frame).toContain('Gm 7d:')
+    // Each pool shows its binding window and the reported percentage left.
+    expect(frame).toContain('Gm 7d 92% left')
     expect(frame).toContain('NG')
     expect(frame).toContain('●')
-    expect(frame).toContain('8%')
-    expect(frame).toContain('4%')
+    expect(frame).toContain('92% left')
+    expect(frame).toContain('96% left')
     testSetup.renderer.destroy()
   })
 })

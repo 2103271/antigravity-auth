@@ -86,6 +86,7 @@ import {
   type AntigravityStateReset,
   type AntigravityStatusDto,
 } from '../rpc/protocol.ts'
+import { registerGaVaultActivation } from './auth.ts'
 
 // Overrides
 
@@ -1300,6 +1301,10 @@ export interface GaLocationServices {
 export type GaLocationServicesFactory = (input: {
   readonly directory: string
   readonly overrides: GaPluginOverrides
+  readonly connections?: Pick<
+    Plugin.Context['integration']['connection'],
+    'active' | 'resolve'
+  >
 }) => Promise<GaLocationServices>
 
 /**
@@ -1413,6 +1418,8 @@ export interface GaHostContext {
   readonly rpc: Pick<Plugin.Context['rpc'], 'register'>
   readonly provider: Pick<Plugin.Context['provider'], 'transform' | 'reload'>
   readonly command: Pick<Plugin.Context['command'], 'transform' | 'reload'>
+  readonly integration?: Pick<Plugin.Context['integration'], 'connection'> &
+    Partial<Pick<Plugin.Context['integration'], 'transform'>>
 }
 
 // Model registration
@@ -1546,29 +1553,34 @@ export async function setupGaActivation(
   const directory = context.location.directory
   const send = createGaRawSender(overrides)
 
-  const services = await factory({ directory, overrides })
-  let runtime: LocationRuntime
-  try {
-    runtime = await createLocationRuntime({
+  const services = await factory({
+    directory,
+    overrides,
+    ...(context.integration && { connections: context.integration.connection }),
+  })
+  const runtime = await createLocationRuntime(
+    {
       ...services.runtime,
       directory,
       logSink: stderrLogSink,
-    })
-  } catch (error) {
-    await services.dispose().catch(() => {
-      // The runtime error is the one the host needs to see.
-    })
-    throw error
-  }
+    },
+    services,
+  )
 
   // Everything below is registered on the runtime scope as a producer. The
   // scope stops producers newest first, so teardown runs: request, retry
   // and response hooks, model registration, RPC, activation, bridge,
-  // services, then the runtime's own producers; after that queued snapshot
+  // quota and token-refresh tasks, then account services; queued snapshot
   // writes drain and the runtime's files and handles close.
   try {
-    runtime.scope.add(services, 'producer')
-
+    if (context.integration?.transform) {
+      runtime.scope.add(
+        await registerGaVaultActivation({
+          integration: { transform: context.integration.transform },
+        }),
+        'producer',
+      )
+    }
     let serving: GaServingServices | null = null
     const requireServing = (): GaServingServices => {
       if (!serving) throw new Error('Antigravity services are not started')

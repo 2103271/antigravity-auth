@@ -1,6 +1,5 @@
 import {
   type AccountRepository,
-  AccountSelector,
   fetchWithAgyCliTransport,
 } from '@cortexkit/antigravity-auth-core'
 import { upsertSidebarActiveRouting } from '../sidebar-state'
@@ -34,15 +33,14 @@ import {
   createLocalQuotaRefresh,
   createRequestExecutor,
   type LocalRequestCredentials,
+  type RequestRoutingEntry,
   type RequestServicesDeps,
 } from './shared/request-services'
 import {
-  createVaultRequestCredentials,
-  refreshVaultAccountRow,
+  createVaultAccountPool,
+  type VaultAccountPool,
   type VaultAccountRow,
   type VaultRequestSource,
-  vaultAccountRowKey,
-  vaultAccountRows,
 } from './shared/vault-request-credentials'
 import { AntigravityTokenRefreshError, refreshAccessToken } from './token'
 import type { PluginClient } from './types'
@@ -58,12 +56,11 @@ const defaultFetchImpl: FetchImpl = (input, init) =>
   globalThis.fetch(input as RequestInfo, init)
 
 /**
- * Inputs the fetch interceptor needs from the plugin bootstrap. Everything
- * the original closure captured from `plugin.ts` now flows through this
- * record so a fresh interceptor can be built per plugin instance without
- * sharing state with siblings.
+ * Inputs the fetch interceptor needs from the plugin bootstrap. Each plugin
+ * instance builds its own interceptor without sharing state with siblings.
  */
 export interface FetchInterceptorContext {
+  readonly assertAdmission?: () => Promise<void>
   readonly client: PluginClient
   readonly directory: string
   readonly providerId: string
@@ -106,6 +103,7 @@ export interface FetchInterceptorContext {
    * network call.
    */
   readonly fetchImpl?: FetchImpl
+  readonly onRouting?: (sessionId: string, entry: RequestRoutingEntry) => void
 }
 
 /**
@@ -114,7 +112,7 @@ export interface FetchInterceptorContext {
  */
 export interface FetchInterceptor {
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>
-  dispose(): void
+  dispose(): void | Promise<void>
 }
 
 /** The local credential operations that differ between account sources. */
@@ -141,7 +139,7 @@ function poolFileCredentials(
         providerId,
       ),
     // A pool-file row has no repository identity; its grant is checked
-    // against the pool itself, as before.
+    // against the pool itself.
     captureGrant: ({ account, accessToken }) => ({
       source: 'pool-file',
       check() {
@@ -193,7 +191,11 @@ function storeCredentials(
 function openCode1EngineCollaborators(
   common: Pick<
     FetchInterceptorContext,
-    'client' | 'config' | 'agySessionRegistry' | 'operatorSettings'
+    | 'client'
+    | 'config'
+    | 'agySessionRegistry'
+    | 'operatorSettings'
+    | 'onRouting'
   > & { transport: AgyTransport; fetchImpl: FetchImpl },
 ): Omit<
   RequestServicesDeps<ManagedAccount>,
@@ -221,16 +223,18 @@ function openCode1EngineCollaborators(
     classifyAccessError: extractAccountAccessErrorDetails,
     notify: (message, variant) =>
       client.tui.showToast({ body: { message, variant } }),
-    onRouting: (sessionId, entry) => {
-      void upsertSidebarActiveRouting(sessionId, entry, {
-        authoritative: true,
-      }).catch((error: unknown) => {
-        log.debug('sidebar-routing-upsert-failed', {
-          sessionId,
-          error: String(error),
+    onRouting:
+      common.onRouting ??
+      ((sessionId, entry) => {
+        void upsertSidebarActiveRouting(sessionId, entry, {
+          authoritative: true,
+        }).catch((error: unknown) => {
+          log.debug('sidebar-routing-upsert-failed', {
+            sessionId,
+            error: String(error),
+          })
         })
-      })
-    },
+      }),
   }
 }
 
@@ -265,7 +269,13 @@ export function createFetchInterceptor(
   // stub survives a process-wide fetch replacement.
   const upstreamFetch = fetchImpl
 
+  const refreshQuotaAfterSuccess = createLocalQuotaRefresh(
+    accountManager,
+    quotaManager,
+    log,
+  )
   const executor = createRequestExecutor<ManagedAccount>({
+    assertAdmission: context.assertAdmission,
     ...openCode1EngineCollaborators({
       ...context,
       transport: agyTransport,
@@ -284,16 +294,16 @@ export function createFetchInterceptor(
         ? storeCredentials(accountManager, accountSource.repository)
         : poolFileCredentials(accountManager, client, providerId)),
       clearStoredAuth: async () => {
+        await context.assertAdmission?.()
         await client.auth.set({
           path: { id: providerId },
           body: { type: 'oauth', refresh: '', access: '', expires: 0 },
         })
       },
-      refreshQuotaAfterSuccess: createLocalQuotaRefresh(
-        accountManager,
-        quotaManager,
-        log,
-      ),
+      refreshQuotaAfterSuccess: async (account, intervalMinutes) => {
+        await context.assertAdmission?.()
+        await refreshQuotaAfterSuccess(account, intervalMinutes)
+      },
     },
     // The trackers the manager selects with: its own for a store-backed
     // manager, the process-wide ones for the pool-file manager.
@@ -307,6 +317,7 @@ export function createFetchInterceptor(
     },
   })
   let disposed = false
+  let disposePromise: Promise<void> | undefined
 
   async function fetch(
     input: RequestInfo | URL,
@@ -323,18 +334,19 @@ export function createFetchInterceptor(
       return upstreamFetch(input, init)
     }
 
-    const latestAuth = await getAuth()
-    if (!isOAuthAuth(latestAuth)) {
-      return upstreamFetch(input, init)
+    await context.assertAdmission?.()
+    if (accountSource.kind === 'pool-file') {
+      const latestAuth = await getAuth()
+      if (!isOAuthAuth(latestAuth)) return upstreamFetch(input, init)
     }
 
     return executor.execute(input, init)
   }
 
-  function dispose(): void {
-    if (disposed) return
+  function dispose(): Promise<void> {
     disposed = true
-    executor.dispose()
+    disposePromise ??= executor.dispose()
+    return disposePromise
   }
 
   return { fetch, dispose }
@@ -355,9 +367,13 @@ export interface VaultFetchInterceptorContext
     | 'operatorSettings'
     | 'agyTransport'
     | 'fetchImpl'
+    | 'onRouting'
+    | 'assertAdmission'
   > {
   /** This location's custody source (the vault account source). */
   readonly source: VaultRequestSource
+  /** Share selection and cached vault state with this activation's menu and sidebar. */
+  readonly pool?: VaultAccountPool
 }
 
 /**
@@ -378,61 +394,43 @@ export function createVaultFetchInterceptor(
     fetchImpl = defaultFetchImpl,
   } = context
   const upstreamFetch = fetchImpl
-  const selector = new AccountSelector<VaultAccountRow>()
+  const pool = context.pool ?? createVaultAccountPool({ source })
+  const selector = pool.selector
   const executor = createRequestExecutor<VaultAccountRow>({
+    assertAdmission: context.assertAdmission,
     ...openCode1EngineCollaborators({
       ...context,
       transport: agyTransport,
       fetchImpl: upstreamFetch,
     }),
     accounts: selector,
-    credentials: createVaultRequestCredentials(source),
+    credentials: pool.credentials,
     trackers: {
       health: selector.healthTracker,
       token: selector.tokenTracker,
     },
   })
 
-  // The roster is read from the vault once before the first request; after
-  // that each request takes the source's last committed routes, keeping each
-  // route's in-memory selection state while its route, credential and
-  // asserted account stay the same. A failed first read is retried by the
-  // next request.
-  let firstRead: Promise<void> | null = null
-  const readRoster = (): Promise<void> => {
-    firstRead ??= source.refresh().then(
-      () => {
-        selector.resetAccounts(vaultAccountRows(source.routes()))
-      },
-      (error: unknown) => {
-        firstRead = null
-        throw error
-      },
-    )
-    return firstRead
-  }
-
   let disposed = false
+  let disposePromise: Promise<void> | undefined
 
   async function fetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
-    if (disposed || !isGenerativeLanguageRequest(input)) {
-      return upstreamFetch(input, init)
-    }
-    await readRoster()
-    selector.replaceAccounts(vaultAccountRows(source.routes()), {
-      keyOf: vaultAccountRowKey,
-      refresh: refreshVaultAccountRow,
-    })
+    if (!isGenerativeLanguageRequest(input)) return upstreamFetch(input, init)
+    if (disposed) throw new Error('The vault request runtime is disposed')
+    await pool.sync()
     return executor.execute(input, init)
   }
 
-  function dispose(): void {
-    if (disposed) return
+  function dispose(): Promise<void> {
     disposed = true
-    executor.dispose()
+    disposePromise ??= (async () => {
+      await executor.dispose()
+      await pool.flush()
+    })()
+    return disposePromise
   }
 
   return { fetch, dispose }

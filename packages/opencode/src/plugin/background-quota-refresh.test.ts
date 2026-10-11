@@ -15,6 +15,7 @@ import {
   readSidebarState,
   SIDEBAR_STATE_ENV,
   setSidebarMachineState,
+  setSidebarMergeHooks,
 } from '../sidebar-state'
 import {
   BackgroundQuotaRefresh,
@@ -1092,7 +1093,24 @@ describe('BackgroundQuotaRefresh', () => {
     //   → pushSidebarQuotaSnapshot (reads the live view)
     //   → sidebar state file (verified via readSidebarState)
 
-    await setSidebarMachineState({ checkedAt: 0, accounts: [] }, { stateFile })
+    const traceSeed = process.env.AGY_TRACE_SIDEBAR_WINDOWS === '1'
+    if (traceSeed) {
+      console.error('quota-windows seed:begin')
+      setSidebarMergeHooks({
+        onStep: (step) => {
+          console.error(`quota-windows seed:${step}`)
+        },
+      })
+    }
+    try {
+      await setSidebarMachineState(
+        { checkedAt: 0, accounts: [] },
+        { stateFile },
+      )
+      if (traceSeed) console.error('quota-windows seed:done')
+    } finally {
+      if (traceSeed) setSidebarMergeHooks(null)
+    }
 
     const windowData = {
       'non-gemini': {
@@ -1459,6 +1477,14 @@ describe('BackgroundQuotaRefresh', () => {
   })
 
   it('keeps a successful quota refresh when the updated account token differs', async () => {
+    const startedAt = performance.now()
+    const phase = (message: string) =>
+      console.log(
+        JSON.stringify({
+          quotaPollerPhase: message,
+          elapsedMs: performance.now() - startedAt,
+        }),
+      )
     const accounts: StubAccount[] = [makeStubAccount('bare-token')]
     const quotaGroups = {
       gemini: { remainingFraction: 0.5, modelCount: 1 },
@@ -1466,6 +1492,7 @@ describe('BackgroundQuotaRefresh', () => {
     const updateQuotaCache = mock(() => {})
     const quotaManager = {
       refreshAccounts: mock(async () => {
+        phase('refresh-start')
         accounts[0]!.parts.refreshToken = 'updated-token'
         return [
           {
@@ -1503,12 +1530,16 @@ describe('BackgroundQuotaRefresh', () => {
       quotaManager: quotaManager as unknown as import('./quota').QuotaManager,
       random: () => 0,
       now: () => Date.now(),
+      logger: { debug: (message) => phase(message) },
     })
+    phase('poller-start')
     poller.start()
 
     await new Promise((resolve) => setTimeout(resolve, 300))
     await poller.dispose()
+    phase('poller-stopped')
 
+    expect(quotaManager.refreshAccounts).toHaveBeenCalledTimes(1)
     expect(updateQuotaCache).toHaveBeenCalledWith(
       0,
       quotaGroups,

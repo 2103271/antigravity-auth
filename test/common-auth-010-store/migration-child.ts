@@ -226,7 +226,7 @@ export async function loadOldMigrationWriter(
   >
 }
 
-/** Verifies every member of published common-auth 0.12.0 before copying unchanged files into a consumer dedicated to this test case. */
+/** Verifies the pinned public archive before copying unchanged files into this test's consumer. */
 export async function preparePublicMigrationConsumer(
   fixture: MigrationFixture,
   inputs: MigrationFixtureInputs,
@@ -260,7 +260,7 @@ export async function preparePublicMigrationConsumer(
   }
   if (
     packageManifest?.name !== '@cortexkit/common-auth' ||
-    packageManifest.version !== '0.12.0'
+    packageManifest.version !== '0.14.1'
   )
     throw new Error('public package inventory differs')
   const exports = record(packageManifest.exports)
@@ -687,7 +687,20 @@ async function runChild(): Promise<void> {
     throw new Error('invalid migration child invocation')
   await assertDisposableChildRoot(root, nonce, process.ppid, process.env)
   await send({ kind: 'owned', nonce, pid: process.pid })
-  const deadline = setTimeout(() => process.exit(75), 2500)
+  const started = performance.now()
+  let lastPhase = 'module-admission'
+  const deadline = setTimeout(() => {
+    console.error(
+      JSON.stringify({
+        kind: 'migration-child-deadline',
+        operation,
+        boundary,
+        lastPhase,
+        elapsedMs: performance.now() - started,
+      }),
+    )
+    process.exit(75)
+  }, 2500)
   try {
     const inputs = migrationFixtureInputs(process.env)
     const modules = await loadPublicMigrationModules(
@@ -699,8 +712,10 @@ async function runChild(): Promise<void> {
       },
       inputs,
     )
+    lastPhase = 'operation-start'
     let seeded = false
     const onBoundary = async (point: string) => {
+      lastPhase = point
       if (
         !seeded &&
         point === 'before-build' &&

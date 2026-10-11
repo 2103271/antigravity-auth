@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { describe, expect } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { lifetimeHooks } from '../../../test/fixtures/lifetime-hooks.ts'
 import { PUBLIC_CONSUMER_ENV } from './__fixtures__/common-auth-public-consumer.test.ts'
 import { publicationPublicModules } from './__fixtures__/publication-public-modules.ts'
 
@@ -44,6 +45,9 @@ const input = (id: string, enabled = true): AccountLoginInput => ({
     enabled,
   },
 })
+// Bun does not stop the async test body at its deadline. Wait for the
+// account-pool replacement test to finish before deleting its files.
+const { it, afterEach } = lifetimeHooks()
 const roots: string[] = []
 const repositories: AccountRepository[] = []
 afterEach(async () => {

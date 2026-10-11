@@ -28,7 +28,7 @@ export const PACKAGE_ROOT = resolve(
 const REPO_ROOT = resolve(PACKAGE_ROOT, '../..')
 const TOOL_ROOT = join(REPO_ROOT, 'tools/common-auth-build')
 const LOCK_HASH =
-  '60c2c98c5e5c68a038a487b282f87f06dba1529e30b08ef7f5ca25694a73cb13'
+  'b3e94e1d2a5bc304b92f23f7bd4d7ae5b1eda874ed07d091a5b1d52d49180c11'
 export interface Graph {
   files: string[]
   externals: string[]
@@ -95,7 +95,7 @@ export const TUI_ROOTS: readonly TuiRoot[] = [V1_TUI_ROOT, GA_TUI_ROOT]
  * preferences, file logger, OpenCode 1 adapter or embedded library module.
  */
 const GA_FORBIDDEN_SOURCE =
-  /\/(?:rpc|plugin|antigravity|hooks)\/|\/ga\/(?:server|rpc)\/|\/common-auth-embedded\/|\/(?:sidebar-state|tui-preferences|constants)\.ts$|\/tui\/(?:file-logger|host-v1|vault-setup)\.tsx?$/
+  /\/(?:rpc|plugin|antigravity|hooks)\/|\/ga\/(?:server|rpc)\/|\/common-auth-embedded\/(?!quota\/(?:index|codec|format|map|merge|projection)(?:\.d)?\.[jt]s$)|\/(?:sidebar-state|tui-preferences|constants)\.ts$|\/tui\/(?:file-logger|host-v1|vault-setup)\.tsx?$/
 /** The only bare packages GA source may import; the host supplies each one. */
 const GA_EXTERNALS = new Set([
   'solid-js',
@@ -183,8 +183,8 @@ export async function auditGraph(
       !types &&
       !(
         tui
-          ? /^(?:rpc\/(?:client|port-file|rpc-client)|logger\/(?:index|engine|capture-sink|redact))\.js$/
-          : /^(?:rpc\/(?:index|client|port-file|rpc-client|rpc-server|server-registry|notifications)|logger\/(?:index|engine|capture-sink|redact))\.js$/
+          ? /^(?:rpc\/(?:client|port-file|rpc-client)|logger\/(?:index|engine|capture-sink|redact)|quota\/(?:index|codec|format|map|merge|projection))\.js$/
+          : /^(?:rpc\/(?:index|client|port-file|rpc-client|rpc-server|server-registry|notifications)|logger\/(?:index|engine|capture-sink|redact)|quota\/(?:index|codec|format|map|merge|projection))\.js$/
       ).test(embedded)
     )
       throw new Error(`graph: forbidden TUI source ${path}`)
@@ -363,7 +363,7 @@ export async function verifyPrerequisites(): Promise<void> {
     const pkg = JSON.parse(await readFile(actual, 'utf8'))
     const expected =
       name === '@cortexkit/common-auth'
-        ? '@cortexkit/common-auth@inputs/cortexkit-common-auth-0.12.0.tgz'
+        ? '@cortexkit/common-auth@inputs/cortexkit-common-auth-0.14.1.tgz'
         : `${pkg.name}@${pkg.version}`
     if (entry[0] !== expected)
       throw new Error(
@@ -633,7 +633,8 @@ async function admitExistingMap(mapFile: string) {
       !('compiler' in metadata) ||
       (metadata.compiler !== '@cortexkit/common-auth/tui-build@0.9.4' &&
         metadata.compiler !== '@cortexkit/common-auth/tui-build@0.11.4' &&
-        metadata.compiler !== '@cortexkit/common-auth/tui-build@0.12.0' &&
+        metadata.compiler !== '@cortexkit/common-auth/tui-build@0.13.0' &&
+        metadata.compiler !== '@cortexkit/common-auth/tui-build@0.14.1' &&
         metadata.compiler !== '@cortexkit/common-auth/tui-build@0.11.6')
     )
       throw new Error('build: existing TUI map is not owned generated metadata')

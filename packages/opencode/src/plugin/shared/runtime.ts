@@ -45,6 +45,7 @@ import type {
   AccountMetadataV3,
   FetchAccountQuota,
 } from '@cortexkit/antigravity-auth-core'
+import { VAULT_ACCOUNT_REMEDY } from '@cortexkit/antigravity-auth-core'
 import type { acquireFencedFileLock } from '@cortexkit/antigravity-auth-core/file-lock'
 
 import {
@@ -264,6 +265,8 @@ export interface LocationRuntimeOptions {
    * tokens close to expiry, so requests rarely wait on a refresh.
    */
   refreshToken: RefreshQueueTokenRefresher
+  /** Check current enrollment before each background task; vault mode suppresses local work. */
+  mayRun?: () => boolean | Promise<boolean>
   /**
    * Best-effort plan tier lookup. The background poller refreshes quota for
    * all accounts on a timer and also records each account's plan tier for
@@ -342,8 +345,12 @@ export interface LocationRuntime {
  */
 export async function createLocationRuntime(
   options: LocationRuntimeOptions,
+  accountResources?: RuntimeResource,
 ): Promise<LocationRuntime> {
   const scope = createRuntimeScope()
+  // Keep account managers and repositories open until quota and token-refresh
+  // producers finish their pending writes.
+  if (accountResources) scope.add(accountResources, 'producer')
   try {
     return await buildLocationRuntime(options, scope)
   } catch (error) {
@@ -434,9 +441,17 @@ async function buildLocationRuntime(
 
   const quotaManager = createLocationQuotaManager({
     logger: logger.createLogger('quota'),
-    fetchAccountQuota: options.fetchAccountQuota,
+    fetchAccountQuota: options.mayRun
+      ? async (account, signal) => {
+          if (!(await options.mayRun?.())) throw new Error(VAULT_ACCOUNT_REMEDY)
+          return options.fetchAccountQuota(account, signal)
+        }
+      : options.fetchAccountQuota,
     sidebar: {
-      write: (state) => options.quotaSnapshots.write(state),
+      write: async (state) => {
+        if (options.mayRun && !(await options.mayRun())) return
+        await options.quotaSnapshots.write(state)
+      },
       getAccounts: sidebarAccounts,
       getActiveIndexByFamily: () => accounts?.getActiveIndexByFamily() ?? null,
       ...(options.healthScore ? { healthScore: options.healthScore } : {}),
@@ -454,6 +469,9 @@ async function buildLocationRuntime(
         config.config.background_quota_refresh_interval_minutes * 60_000,
       snapshots: options.quotaSnapshots,
       getAccountManager: () => accounts,
+      ...(options.mayRun
+        ? { mayRun: async () => Boolean(await options.mayRun?.()) }
+        : {}),
       quotaManager,
       ...(options.loadAccountTier
         ? { loadAccountTier: options.loadAccountTier }
@@ -506,6 +524,9 @@ async function buildLocationRuntime(
         },
         {
           enabled: true,
+          ...(options.mayRun
+            ? { mayRun: async () => Boolean(await options.mayRun?.()) }
+            : {}),
           bufferSeconds: config.config.proactive_refresh_buffer_seconds,
           checkIntervalSeconds:
             config.config.proactive_refresh_check_interval_seconds,

@@ -164,7 +164,12 @@ describe('shared request engine import graph', () => {
     }
 
     expect(imports).toEqual({
+      './request-cancellation': [
+        'createRequestCancellation',
+        'retainResponseLifetime',
+      ],
       '@cortexkit/antigravity-auth-core': [
+        'VAULT_ACCOUNT_REMEDY',
         'accessTokenExpired',
         'calculateBackoffMs',
         'computeSoftQuotaCacheTtlMs',

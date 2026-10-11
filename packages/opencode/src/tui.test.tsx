@@ -196,7 +196,7 @@ describe('SidebarPanel', () => {
     testSetup.renderer.destroy()
   })
 
-  it('renders fleet-shaped used-quota bars in short fixed gutters', async () => {
+  it('renders remaining-quota bars and shared figures in short fixed gutters', async () => {
     const future = Date.now() + 5 * 60 * 1000
     const payload = writeState({
       checkedAt: Date.now(),
@@ -210,8 +210,12 @@ describe('SidebarPanel', () => {
           current: true,
           cooldownUntil: future,
           quota: {
-            'non-gemini': { remainingPercent: 75 },
-            gemini: { remainingPercent: 10, resetAt: future },
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+            gemini: {
+              remainingPercent: 10,
+              resetAt: future,
+              checkedAt: Date.now(),
+            },
           },
         },
         {
@@ -221,7 +225,7 @@ describe('SidebarPanel', () => {
           health: 42,
           current: false,
           quota: {
-            'non-gemini': { remainingPercent: 60 },
+            'non-gemini': { remainingPercent: 60, checkedAt: Date.now() },
           },
         },
       ],
@@ -247,10 +251,10 @@ describe('SidebarPanel', () => {
     expect(frame).toContain('NG')
     expect(frame).not.toContain('Gemini')
     expect(frame).not.toContain('Non-Gemini')
-    expect(frame).toContain('25%')
-    expect(frame).toContain('90%')
-    expect(frame).toContain('40%')
-    expect(frame).toContain('███░░░░░░░')
+    expect(frame).toContain('75% left')
+    expect(frame).toContain('10% left')
+    expect(frame).toContain('60% left')
+    expect(frame).toContain('████████░░')
     testSetup.renderer.destroy()
   })
 
@@ -677,8 +681,8 @@ describe('SidebarPanel collapse/expand + compact row', () => {
           health: 80,
           current: true,
           quota: {
-            'non-gemini': { remainingPercent: 75 },
-            gemini: { remainingPercent: 30 },
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+            gemini: { remainingPercent: 30, checkedAt: Date.now() },
           },
         },
       ],
@@ -711,8 +715,8 @@ describe('SidebarPanel collapse/expand + compact row', () => {
     const frame = testSetup.captureCharFrame()
     // Compact row: active account + both quota pools (Gm · NG) + filled dot.
     expect(frame).toContain('Primary')
-    expect(frame).toContain('Gm: 70%')
-    expect(frame).toContain('NG: 25%')
+    expect(frame).toContain('Gm 30% left')
+    expect(frame).toContain('NG 75% left')
     expect(frame).toContain('●')
     // Header indicator is the collapsed glyph.
     expect(frame).toContain('▶')
@@ -764,8 +768,8 @@ describe('SidebarPanel collapse/expand + compact row', () => {
           health: 80,
           current: true,
           quota: {
-            'non-gemini': { remainingPercent: 75 },
-            gemini: { remainingPercent: 30 },
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+            gemini: { remainingPercent: 30, checkedAt: Date.now() },
           },
         },
       ],
@@ -805,8 +809,8 @@ describe('SidebarPanel collapse/expand + compact row', () => {
     await testSetup.flush()
     const collapsedFrame = testSetup.captureCharFrame()
     expect(collapsedFrame).toContain('▶')
-    expect(collapsedFrame).toContain('Gm:')
-    expect(collapsedFrame).toContain('NG:')
+    expect(collapsedFrame).toContain('Gm 30% left')
+    expect(collapsedFrame).toContain('NG 75% left')
     testSetup.renderer.destroy()
   })
 
@@ -825,8 +829,8 @@ describe('SidebarPanel collapse/expand + compact row', () => {
           health: 80,
           current: true,
           quota: {
-            'non-gemini': { remainingPercent: 75 },
-            gemini: { remainingPercent: 30 },
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+            gemini: { remainingPercent: 30, checkedAt: Date.now() },
           },
         },
       ],
@@ -889,7 +893,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 80,
           current: true,
-          quota: { 'non-gemini': { remainingPercent: 75 } },
+          quota: {
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+          },
         },
       ],
     })
@@ -1031,7 +1037,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 80,
           current: true,
-          quota: { 'non-gemini': { remainingPercent: 75 } },
+          quota: {
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+          },
         },
         {
           id: 'acc-2',
@@ -1039,7 +1047,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 60,
           current: false,
-          quota: { 'non-gemini': { remainingPercent: 50 } },
+          quota: {
+            'non-gemini': { remainingPercent: 50, checkedAt: Date.now() },
+          },
         },
       ],
     })
@@ -1083,7 +1093,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 80,
           current: true,
-          quota: { 'non-gemini': { remainingPercent: 75 } },
+          quota: {
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+          },
         },
       ],
     })
@@ -1162,7 +1174,7 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           health: 80,
           current: true,
           quota: {
-            'non-gemini': { remainingPercent: 75 },
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
           },
         },
       ],
@@ -1195,9 +1207,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
     )
     await testSetup.flush()
     const frame = testSetup.captureCharFrame()
-    // 25% used of width 8 => two filled cells and six empty cells.
-    expect(frame).toContain('##')
-    expect(frame).toContain('------')
+    // 75% left of width 8 fills six cells and leaves two empty cells.
+    expect(frame).toContain('######--')
+    expect(frame).toContain('75% left')
     testSetup.renderer.destroy()
   })
 
@@ -1212,7 +1224,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 80,
           current: true,
-          quota: { 'non-gemini': { remainingPercent: 75 } },
+          quota: {
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+          },
         },
         {
           id: 'acc-2',
@@ -1220,7 +1234,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 60,
           current: false,
-          quota: { 'non-gemini': { remainingPercent: 50 } },
+          quota: {
+            'non-gemini': { remainingPercent: 50, checkedAt: Date.now() },
+          },
         },
       ],
     })
@@ -1266,7 +1282,9 @@ describe('SidebarPanel sections + themed border (T6)', () => {
           enabled: true,
           health: 80,
           current: true,
-          quota: { 'non-gemini': { remainingPercent: 75 } },
+          quota: {
+            'non-gemini': { remainingPercent: 75, checkedAt: Date.now() },
+          },
         },
       ],
     })
@@ -1670,7 +1688,7 @@ function gaAccount(overrides: Record<string, unknown> = {}) {
     enabled: true,
     health: 90,
     current: true,
-    quota: { gemini: { remainingPercent: 55 } },
+    quota: { gemini: { remainingPercent: 55, checkedAt: Date.now() } },
     ...overrides,
   }
 }
@@ -2036,7 +2054,12 @@ function renderClaim(
 describe('GA TUI setup', () => {
   type Select = {
     title: string
-    options: Array<{ title: string; value: string }>
+    options: Array<{
+      title: string
+      value: string
+      category?: string
+      footer?: string
+    }>
   }
   function fakeContext(answers: unknown[], picks: string[] = []) {
     const calls: Array<Record<string, any>> = []
@@ -2127,12 +2150,16 @@ describe('GA TUI setup', () => {
     await settle0()
     expect(fake.selects[0]?.title).toBe('Routing')
     expect(fake.selects[0]?.options.map((option) => option.title)).toEqual([
-      'Gemini CLI first: off',
-      'Quota-style fallback: off',
       'Turn Gemini CLI first on',
       'Turn quota-style fallback on',
       'Back',
     ])
+    expect(fake.selects[0]?.options[0]?.category).toContain(
+      'Gemini CLI first: off',
+    )
+    expect(fake.selects[0]?.options[0]?.category).toContain(
+      'Quota-style fallback: off',
+    )
 
     const view = await testRender(() => renderClaim(fake.claim(), 'ses_a'), {
       width: 40,
@@ -2186,8 +2213,13 @@ describe('GA TUI setup', () => {
     ])
     const last = fake.selects.at(-1)
     expect(last?.title).toBe('Routing')
-    expect(last?.options[0]?.title).toBe('Gemini CLI first: on')
-    expect(last?.options[2]?.title).toBe('Turn Gemini CLI first off')
+    expect(last?.options[0]?.category).toContain('Gemini CLI first: on')
+    expect(last?.options[0]?.title).toBe('Turn Gemini CLI first off')
+    expect(last?.options.map((option) => option.title)).toEqual([
+      'Turn Gemini CLI first off',
+      'Turn quota-style fallback on',
+      'Back',
+    ])
     await cleanup()
   })
 
@@ -2323,6 +2355,10 @@ describe('TUI module graph', () => {
     expect(files.sort()).toEqual(
       [
         join(SRC, 'ga', 'tui', 'host-ga.tsx'),
+        join(SRC, 'quota-presentation.ts'),
+        ...['codec', 'format', 'index', 'map', 'merge', 'projection'].map(
+          (name) => join(SRC, 'common-auth-embedded', 'quota', `${name}.js`),
+        ),
         join(SRC, 'sidebar-projection.ts'),
         join(SRC, 'tui', 'command-dialogs.tsx'),
         join(SRC, 'tui', 'host-api.ts'),

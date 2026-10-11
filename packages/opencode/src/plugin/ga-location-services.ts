@@ -49,13 +49,13 @@ import {
   type ManagedAccount,
   type OAuthAuthDetails,
   parseRefreshParts,
-  quotaCheckOutcome,
   type RowRef,
   readAccountStoreAdmission,
   readAccountStoreBinding,
   refreshAntigravityToken,
   rowRefKey,
   sameRowRef,
+  VAULT_ACCOUNT_REMEDY,
   type VaultRouteRef,
 } from '@cortexkit/antigravity-auth-core'
 import type {
@@ -122,6 +122,7 @@ import {
   createMemoryQuotaSnapshots,
   type LocationRuntime,
 } from './shared/runtime.ts'
+import { createVaultAccountMenuSections } from './shared/vault-menu'
 import {
   checkVaultQuota,
   createVaultAccountPool,
@@ -398,6 +399,10 @@ function redactionInputOf(
     ...(cooldown !== null ? { coolingDownUntil: cooldown } : {}),
     ...(score !== undefined ? { healthScore: score } : {}),
     ...(quota !== undefined ? { cachedQuota: quota } : {}),
+    ...(row.quota.status === 'present' &&
+    typeof row.quota.quota.cachedQuotaUpdatedAt === 'number'
+      ? { cachedQuotaUpdatedAt: row.quota.quota.cachedQuotaUpdatedAt }
+      : {}),
     ...(tier !== undefined ? { tier } : {}),
   }
 }
@@ -436,6 +441,7 @@ export function gaSettingsOf(
 export interface GaAccountStateOptions {
   readonly repository: Pick<AccountRepository, 'read'>
   readonly registry: GaSelectorRegistry
+  readonly nextReadSeq?: () => number
   readonly generation: string
   /** Read fresh for every answer, after the repository read. */
   readonly settings: () => AntigravitySettingsDto
@@ -517,7 +523,7 @@ export function createGaAccountStateSource(
     if (input.signal.aborted) throw abortError(input.signal)
 
     const retiredSelectors = projected.plan?.commit() ?? []
-    readSeq += 1
+    readSeq = options.nextReadSeq?.() ?? readSeq + 1
     const answer: GaStateRead = {
       readSeq,
       accounts:
@@ -583,7 +589,6 @@ export function createGaAccountStateSource(
 type GaMenuOptions = Parameters<
   CommonAuthCommandsModule['createCommandMenu']
 >[0]
-type GaMenuSection = NonNullable<GaMenuOptions['cache']>
 type GaMenuExtraSection = NonNullable<GaMenuOptions['extras']>[number]
 
 /** The shared `/antigravity` menu, as the core factory builds it. */
@@ -732,6 +737,7 @@ type GaReauthorize = NonNullable<
  * the state of the sign-in it was started for.
  */
 export function createGaReauthorize(input: {
+  readonly assertAdmission?: () => Promise<void>
   readonly repository: AccountRepository
   readonly overrides: GaPluginOverrides
   readonly afterChange: () => Promise<void>
@@ -750,16 +756,43 @@ export function createGaReauthorize(input: {
     },
   })
   const listeners = new Set<OAuthListener>()
+  const continuations = new Set<Promise<void>>()
+  const shutdown = new AbortController()
   let disposed = false
 
-  /** Starts waiting for the redirect; resolves with the waiting promise. */
+  const waitForRedirect = (code: Promise<string>): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const detach = () => shutdown.signal.removeEventListener('abort', abort)
+      const abort = () => {
+        detach()
+        reject(shutdown.signal.reason)
+      }
+      if (shutdown.signal.aborted) reject(shutdown.signal.reason)
+      else shutdown.signal.addEventListener('abort', abort, { once: true })
+      void code.then(
+        (value) => {
+          detach()
+          resolve(value)
+        },
+        (error) => {
+          detach()
+          reject(error)
+        },
+      )
+    })
+
+  /** Return the callback promise inside an object so setup can finish before the browser login. */
   const startWaiting = async (
     expectedState: string,
-  ): Promise<Promise<string>> => {
-    if (waitForCode) return waitForCode(expectedState)
+  ): Promise<{ code: Promise<string> }> => {
+    if (waitForCode) return { code: waitForCode(expectedState) }
     const listener = await startOAuthListener()
+    if (disposed) {
+      await listener.close()
+      throw shutdown.signal.reason
+    }
     listeners.add(listener)
-    return (async () => {
+    const code = (async () => {
       try {
         const url = await listener.waitForCallback()
         if (url.searchParams.get('state') !== expectedState)
@@ -772,6 +805,7 @@ export function createGaReauthorize(input: {
         await listener.close()
       }
     })()
+    return { code }
   }
 
   return {
@@ -782,7 +816,9 @@ export function createGaReauthorize(input: {
           text: 'The location is shutting down.',
           code: 'refused',
         }
+      await input.assertAdmission?.()
       const authorization = await authorize()
+      if (disposed) throw shutdown.signal.reason
       const state = new URL(authorization.url).searchParams.get('state')
       if (!state)
         return {
@@ -791,9 +827,11 @@ export function createGaReauthorize(input: {
           code: 'action-failed',
         }
       const waiting = await startWaiting(state)
-      void (async () => {
+      const continuation = (async () => {
         try {
-          const code = await waiting
+          const code = await waitForRedirect(waiting.code)
+          await input.assertAdmission?.()
+          if (disposed) throw shutdown.signal.reason
           const result = await exchange(code, state)
           if (result.type !== 'success') {
             invocation.notify('The sign-in was not completed.', 'error')
@@ -803,19 +841,29 @@ export function createGaReauthorize(input: {
           await input.afterChange()
           invocation.notify('Account reauthorized.', 'info')
         } catch {
-          invocation.notify(
-            'The account could not be reauthorized; nothing was changed.',
-            'error',
-          )
+          if (!disposed)
+            invocation.notify('The account could not be reauthorized.', 'error')
         }
       })()
+      continuations.add(continuation)
+      void continuation.then(
+        () => continuations.delete(continuation),
+        () => continuations.delete(continuation),
+      )
       return `Sign in with the browser to reauthorize this account:\n${authorization.url}\nWaiting for the browser…`
     },
     async dispose() {
       disposed = true
+      shutdown.abort(new Error('The location is shutting down.'))
       const open = [...listeners]
       listeners.clear()
-      await Promise.all(open.map((listener) => listener.close()))
+      const results = await Promise.allSettled(
+        open.map((listener) => listener.close()),
+      )
+      while (continuations.size > 0)
+        await Promise.allSettled([...continuations])
+      const failure = results.find((result) => result.status === 'rejected')
+      if (failure?.status === 'rejected') throw failure.reason
     },
   }
 }
@@ -890,6 +938,7 @@ export const GA_ACCOUNTS_FILE = 'antigravity-accounts.json'
 /** What `start` hands the request pipeline binding. */
 export interface GaRequestPipelineInput {
   readonly repository: AccountRepository
+  readonly assertAdmission?: () => Promise<void>
   readonly runtime: GaStartInput['runtime']
   readonly send: GaStartInput['send']
   readonly generation: string
@@ -925,7 +974,8 @@ export interface GaLocationServicesBindings {
   /** The location runtime's collaborators (sidebar file, quota, refresh). */
   readonly runtime: (input: {
     readonly directory: string
-    readonly repository: AccountRepository
+    readonly getRepository: () => Promise<AccountRepository>
+    readonly assertAdmission: () => Promise<void>
     readonly overrides: GaPluginOverrides
   }) => GaRuntimeCollaborators
   /** Builds the shared request engine over the location's repository. */
@@ -1260,6 +1310,7 @@ function rowRefOfTarget(account: AccountMetadataV3): RowRef | undefined {
  * error result instead of being checked on another credential.
  */
 export function createGaFetchAccountQuota(options: {
+  readonly assertAdmission?: () => Promise<void>
   readonly repository: Pick<AccountRepository, 'read' | 'refresh'>
   readonly now: () => number
   readonly overrides: GaPluginOverrides
@@ -1274,6 +1325,7 @@ export function createGaFetchAccountQuota(options: {
     async authorize(account) {
       // Captured before any await: the ref of exactly this target.
       const rowRef = rowRefOfTarget(account)
+      await options.assertAdmission?.()
       const authorization = await authorizeGaQuotaCheck(
         options.repository,
         { rowRef },
@@ -1283,7 +1335,9 @@ export function createGaFetchAccountQuota(options: {
         return { status: 'refused', reason: authorization.reason }
       const ref = authorization.ref
       const accessToken = authorization.auth.access ?? ''
+      await options.assertAdmission?.()
       const project = await ensureProject(authorization.auth)
+      await options.assertAdmission?.()
       const managedProjectId = parseRefreshParts(
         project.auth.refresh,
       ).managedProjectId
@@ -1296,6 +1350,7 @@ export function createGaFetchAccountQuota(options: {
         // Before every request: the row must still hold exactly this
         // credential and this access token.
         confirmSend: async () => {
+          await options.assertAdmission?.()
           const read = await options.repository.read()
           const row =
             read.status === 'ready'
@@ -1310,6 +1365,7 @@ export function createGaFetchAccountQuota(options: {
             return { status: 'stale', reason: 'credential changed' }
           if (row.credential?.accessToken !== accessToken)
             return { status: 'stale', reason: 'access token changed' }
+          await options.assertAdmission?.()
           return { status: 'current' }
         },
       }
@@ -1437,6 +1493,7 @@ export async function createGaLocalRequestPipeline(
   },
 ): Promise<GaRequestPipeline> {
   const runtime = input.runtime
+  await input.assertAdmission?.()
   const manager = await loadAccountManagerFromRepository(input.repository)
   input.accounts.current = manager
   input.accounts.quotaLogger = runtime.logger.createLogger('quota')
@@ -1450,6 +1507,9 @@ export async function createGaLocalRequestPipeline(
       logger,
     }),
     accounts: manager,
+    ...(input.assertAdmission
+      ? { assertAdmission: input.assertAdmission }
+      : {}),
     credentials: createGaLocalCredentials(manager, {
       repository: input.repository,
       overrides: input.overrides,
@@ -1472,6 +1532,14 @@ export async function createGaLocalRequestPipeline(
   const storeQuota = createStoreQuotaService({
     manager,
     repository: input.repository,
+    ...(input.assertAdmission
+      ? {
+          mayRun: async () => {
+            await input.assertAdmission?.()
+            return true
+          },
+        }
+      : {}),
     logger: runtime.logger.createLogger('store-quota'),
     ...(quotaFetch ? { transport: () => quotaFetch } : {}),
   })
@@ -1480,14 +1548,14 @@ export async function createGaLocalRequestPipeline(
     refreshQuota: (refs) => storeQuota.checkStoreQuota(refs),
     refreshAccounts: () => manager.refreshFromRepository(),
     async dispose() {
-      executor.dispose()
+      await executor.dispose()
       await storeQuota.dispose()
       if (input.accounts.current === manager) {
         input.accounts.current = null
         input.accounts.quotaLogger = null
       }
       await runtime.replaceAccounts(null)
-      await manager.flushSaveToDisk()
+      await manager.dispose()
     },
   }
 }
@@ -1505,12 +1573,14 @@ export async function createGaLocalRequestPipeline(
  * last served it.
  */
 export async function createGaVaultRequestPipeline(input: {
+  readonly assertAdmission?: () => Promise<void>
   readonly pool: VaultAccountPool
   readonly runtime: GaStartInput['runtime']
   readonly overrides: GaPluginOverrides
   readonly routes: GaRouteBook
 }): Promise<GaRequestPipeline & { rows(): readonly VaultAccountRow[] }> {
   const { pool } = input
+  await input.assertAdmission?.()
   await pool.sync()
   const logger = input.runtime.logger.createLogger('request')
   const executor = createRequestExecutor<VaultAccountRow>({
@@ -1521,6 +1591,9 @@ export async function createGaVaultRequestPipeline(input: {
       logger,
     }),
     accounts: pool.selector,
+    ...(input.assertAdmission
+      ? { assertAdmission: input.assertAdmission }
+      : {}),
     credentials: pool.credentials,
     trackers: {
       health: pool.selector.healthTracker,
@@ -1529,13 +1602,17 @@ export async function createGaVaultRequestPipeline(input: {
   })
   return {
     execute: async (job, context) => {
+      await input.assertAdmission?.()
       await pool.sync()
       return createGaJobExecutor(executor)(job, context)
     },
     rows: () => pool.selector.rows,
-    refreshAccounts: () => pool.refresh(),
+    refreshAccounts: async () => {
+      await input.assertAdmission?.()
+      await pool.refresh()
+    },
     async dispose() {
-      executor.dispose()
+      await executor.dispose()
       await pool.flush()
     },
   }
@@ -1563,79 +1640,6 @@ function vaultSelectors(createSelector: () => string) {
 }
 
 /**
- * The Accounts and Quota sections of a vault custody location. Accounts
- * lists the vault's selectable accounts by position; the vault, not this
- * plugin, adds and removes them. Quota shows each account's last recorded
- * reading and, with `checkQuota`, checks quota now through the vault.
- */
-function gaVaultAccountSections(
-  pool: Pick<VaultAccountPool, 'selector'>,
-  selectorOf: (row: VaultAccountRow) => string,
-  checkQuota?: (signal: AbortSignal) => Promise<AntigravityQuotaCheckReport>,
-): { accounts: GaMenuSection; quota: GaMenuSection } {
-  return {
-    accounts: {
-      title: 'Accounts',
-      build: () => {
-        const rows = pool.selector.rows
-        return {
-          lines: [
-            rows.length === 0
-              ? 'The vault serves no accounts to this computer yet.'
-              : `${rows.length} accounts served from the vault`,
-          ],
-          items: rows.map((row, position) => ({
-            id: selectorOf(row),
-            label: `Account ${position + 1}`,
-            detail: 'served from the vault',
-          })),
-        }
-      },
-    },
-    quota: {
-      title: 'Quota',
-      build: () => {
-        const rows = pool.selector.rows
-        return {
-          lines:
-            rows.length === 0
-              ? ['The vault serves no accounts to this computer yet.']
-              : rows.map((row, position) => {
-                  const groups = Object.entries(row.cachedQuota ?? {})
-                  return groups.length === 0
-                    ? `Account ${position + 1}: no quota reading`
-                    : `Account ${position + 1}: ${groups
-                        .map(
-                          ([name, group]) =>
-                            `${name} ${
-                              typeof group?.remainingFraction === 'number'
-                                ? `${Math.round(group.remainingFraction * 100)}%`
-                                : '\u2013'
-                            }`,
-                        )
-                        .join(' \u00b7 ')}`
-                }),
-          actions: checkQuota
-            ? [
-                {
-                  id: 'refresh',
-                  label: 'Check quota now',
-                  run: async () => {
-                    const controller = new AbortController()
-                    return quotaCheckOutcome(
-                      await checkQuota(controller.signal),
-                    )
-                  },
-                },
-              ]
-            : [],
-        }
-      },
-    },
-  }
-}
-
-/**
  * The `state` source of a vault custody location: the vault's selectable
  * accounts as redaction rows with opaque selectors, read one at a time.
  * Vault rows carry no metadata or access blocks of this plugin's own.
@@ -1644,6 +1648,7 @@ function createGaVaultStateSource(input: {
   /** The pipeline's current selection rows. */
   readonly rows: () => readonly VaultAccountRow[]
   readonly selectorOf: (row: VaultAccountRow) => string
+  readonly nextReadSeq?: () => number
   readonly generation: string
   readonly settings: () => AntigravitySettingsDto
   readonly route: (scope: AntigravityRpcScope) => SidebarRoutingEntry | null
@@ -1657,7 +1662,7 @@ function createGaVaultStateSource(input: {
     const settings = input.settings()
     const route = input.route(scope)
     if (signal.aborted) throw abortError(signal)
-    readSeq += 1
+    readSeq = input.nextReadSeq?.() ?? readSeq + 1
     const overLimit = rows.length > ACCOUNT_LIMIT
     const answer: GaStateRead = {
       readSeq,
@@ -1729,14 +1734,17 @@ function createGaVaultStateSource(input: {
 
 /**
  * A GA location whose accounts are held by the vault. No local account
- * store is opened. The vault source is taken from custody (which refuses
- * while OpenCode holds its own Google login), requests go through
+ * store is opened. Saved Google logins stay dormant on disk. The vault
+ * source is taken from custody, and requests go through
  * `createGaVaultRequestPipeline`, and the menu shows the vault's accounts,
  * this location's settings and the Vault section. The runtime keeps quota
  * snapshots in memory; it gets no account view, so its quota poller and
  * token refresh queue do not run for vault accounts.
  */
 async function createGaVaultLocationServices(input: {
+  readonly afterApply?: (refreshVault: () => Promise<void>) => Promise<void>
+  readonly nextReadSeq?: () => number
+  readonly assertAdmission?: () => Promise<void>
   readonly custody: GaLocationCustody
   readonly overrides: GaPluginOverrides
   readonly bindings: Pick<
@@ -1745,13 +1753,8 @@ async function createGaVaultLocationServices(input: {
   >
 }): Promise<GaLocationServices> {
   const { custody, overrides } = input
-  let source: GaVaultCustodySource
-  try {
-    source = await custody.custodySource()
-  } catch (error) {
-    await custody.dispose()
-    throw error
-  }
+  await input.assertAdmission?.()
+  const source = await custody.custodySource()
   const selectorOf = vaultSelectors(
     input.bindings.createSelector ?? defaultSelector,
   )
@@ -1790,6 +1793,9 @@ async function createGaVaultLocationServices(input: {
         },
       })
       pipeline = await createGaVaultRequestPipeline({
+        ...(input.assertAdmission
+          ? { assertAdmission: input.assertAdmission }
+          : {}),
         pool,
         runtime: location,
         overrides,
@@ -1801,8 +1807,9 @@ async function createGaVaultLocationServices(input: {
         ? (signal: AbortSignal) =>
             checkVaultQuota({
               pool,
-              fetchReading: (ref, check) =>
-                fetchVaultQuota({
+              fetchReading: async (ref, check) => {
+                await input.assertAdmission?.()
+                return fetchVaultQuota({
                   source,
                   ref,
                   signal: check,
@@ -1810,7 +1817,8 @@ async function createGaVaultLocationServices(input: {
                   ...(overrides.quotaFetch
                     ? { transport: overrides.quotaFetch }
                     : {}),
-                }),
+                })
+              },
               signal,
               onError: (error) =>
                 quotaLogger.debug('vault-quota-not-recorded', {
@@ -1824,7 +1832,7 @@ async function createGaVaultLocationServices(input: {
         source: 'sections',
         commands: await loadCommonAuthCommands(),
         sections: {
-          ...gaVaultAccountSections(pool, selectorOf, checkQuota),
+          ...createVaultAccountMenuSections(pool, selectorOf, checkQuota),
           ...antigravitySettingsSections(settings),
         },
         diagnostics: diagnosticsMenuSection({
@@ -1839,6 +1847,7 @@ async function createGaVaultLocationServices(input: {
         state: createGaVaultStateSource({
           rows: () => started.rows(),
           selectorOf,
+          ...(input.nextReadSeq ? { nextReadSeq: input.nextReadSeq } : {}),
           generation: start.generation,
           settings: () =>
             gaSettingsOf(location.operatorSettings.get(), location.dump),
@@ -1850,7 +1859,10 @@ async function createGaVaultLocationServices(input: {
         commands: createGaMenuCommandService({
           menu,
           notify: start.notify,
-          afterApply: () => started.refreshAccounts(),
+          afterApply: () =>
+            input.afterApply
+              ? input.afterApply(() => started.refreshAccounts())
+              : started.refreshAccounts(),
         }),
       }
     },
@@ -1858,22 +1870,13 @@ async function createGaVaultLocationServices(input: {
       disposed ??= (async () => {
         const active = pipeline
         pipeline = null
-        try {
-          if (active) await active.dispose()
-        } finally {
-          await custody.dispose()
-        }
+        if (active) await active.dispose()
       })()
       return disposed
     },
   }
 }
 
-/**
- * Builds a `GaLocationServicesFactory` over explicit bindings. Every
- * resource acquired during construction or `start` is released if that step
- * fails; `dispose` releases the pipeline, then the repository.
- */
 export function createGaLocationServicesFactory(
   bindings: GaLocationServicesBindings,
 ): GaLocationServicesFactory {
@@ -1882,106 +1885,430 @@ export function createGaLocationServicesFactory(
       accountFile: bindings.resolveAccountFile(directory),
       overrides,
     })
-    if (custody) {
+    type Serving = Awaited<ReturnType<GaLocationServices['start']>>
+    let closing = false
+    let started = false
+    let disposal: Promise<void> | undefined
+    // Enrollment selects a binding, not its lifetime. Local files stay unopened
+    // until a locally authorized operation needs them, and failures can retry.
+    let repositoryPromise: Promise<LocationRepository> | undefined
+    let servingRepository: AccountRepository | undefined
+    let localPromise: Promise<Serving> | undefined
+    let vaultPromise: Promise<Serving> | undefined
+    let vaultServices: GaLocationServices | undefined
+    let localPipeline: GaRequestPipeline | undefined
+    let reauthorize: ReturnType<typeof createGaReauthorize> | undefined
+    let readSeq = 0
+    const inFlight = new Set<Promise<unknown>>()
+    const run = <T>(work: () => Promise<T>): Promise<T> => {
+      if (closing)
+        return Promise.reject(new Error('The location services are disposed'))
+      const pending = Promise.resolve().then(work)
+      inFlight.add(pending)
+      void pending.then(
+        () => inFlight.delete(pending),
+        () => inFlight.delete(pending),
+      )
+      return pending
+    }
+    const nextReadSeq = () => ++readSeq
+    const registry = createGaSelectorRegistry(bindings.createSelector)
+    const authority = async (): Promise<'local' | 'vault' | 'unreadable'> => {
+      if (!custody) return 'local'
       const mode = await custody.readMode()
-      if (!mode.ok) {
-        await custody.dispose()
-        throw new Error(
-          `The Antigravity vault mode is unclear (${mode.reason}); choose a mode in the Vault section of the Antigravity menu.`,
-        )
+      return mode.ok
+        ? mode.record.mode === 'custody'
+          ? 'vault'
+          : 'local'
+        : 'unreadable'
+    }
+    const assertLocal = async () => {
+      if (closing) throw new Error('The location services are disposed')
+      const selected = await authority()
+      if (closing) throw new Error('The location services are disposed')
+      if (selected !== 'local') throw new Error(VAULT_ACCOUNT_REMEDY)
+    }
+    const refreshSelectedSource = async (
+      refreshVault?: () => Promise<void>,
+    ): Promise<void> => {
+      const selected = await authority()
+      if (closing) throw new Error('The location services are disposed')
+      if (selected === 'unreadable') throw new Error(VAULT_ACCOUNT_REMEDY)
+      // A menu action may change sources. Refresh only the newly selected
+      // account view, keeping both runtime bindings and their generation intact.
+      if (selected === 'local') {
+        await assertLocal()
+        await localPipeline?.refreshAccounts()
+      } else await refreshVault?.()
+    }
+    const getRepository = async (): Promise<AccountRepository> => {
+      await assertLocal()
+      repositoryPromise ??= openLocationRepository(
+        directory,
+        bindings,
+        overrides,
+      ).catch((error) => {
+        repositoryPromise = undefined
+        throw error
+      })
+      const repository = (await repositoryPromise).repository
+      if (!servingRepository) {
+        const methods = new Map<PropertyKey, unknown>()
+        const pendingAdmissions = new Set<Promise<unknown>>()
+        const refusedWrites: unknown[] = []
+        servingRepository = new Proxy(repository, {
+          get(target, key) {
+            const value: unknown = Reflect.get(target, key, target)
+            if (typeof value !== 'function') return value
+            if (!methods.has(key)) {
+              methods.set(key, (...args: unknown[]) => {
+                if (key === 'flush' || key === 'settled' || key === 'dispose') {
+                  return (async () => {
+                    // Calls still awaiting the local-source check have not entered
+                    // the repository's queue. Wait for them before flushing it.
+                    await Promise.allSettled([...pendingAdmissions])
+                    const result: unknown = await Reflect.apply(
+                      value,
+                      target,
+                      args,
+                    )
+                    if (key !== 'settled' && refusedWrites.length > 0) {
+                      const failures = refusedWrites.splice(0)
+                      throw new AggregateError(
+                        failures,
+                        'Local writes were refused by source authority',
+                      )
+                    }
+                    return result
+                  })()
+                }
+                const pending = (async () => {
+                  // A refresh that passed the local-source check saves its new
+                  // credentials inside this call. Later operations check again.
+                  try {
+                    await assertLocal()
+                  } catch (error) {
+                    if (key !== 'read') refusedWrites.push(error)
+                    throw error
+                  }
+                  return Reflect.apply(value, target, args)
+                })()
+                pendingAdmissions.add(pending)
+                void pending.then(
+                  () => pendingAdmissions.delete(pending),
+                  () => pendingAdmissions.delete(pending),
+                )
+                return pending
+              })
+            }
+            return methods.get(key)
+          },
+        })
       }
-      if (mode.record.mode === 'custody')
-        return createGaVaultLocationServices({ custody, overrides, bindings })
+      return servingRepository
     }
-    let opened: LocationRepository
-    try {
-      opened = await openLocationRepository(directory, bindings, overrides)
-    } catch (error) {
-      await custody?.dispose()
-      throw error
-    }
-    const repository = opened.repository
     let runtime: GaRuntimeCollaborators
     try {
-      runtime = bindings.runtime({ directory, repository, overrides })
-    } catch (error) {
-      await repository.dispose().catch(() => {
-        // The construction error is the one the host needs to see.
+      const collaborators = bindings.runtime({
+        directory,
+        getRepository,
+        assertAdmission: assertLocal,
+        overrides,
       })
+      const previousMayRun = collaborators.mayRun
+      runtime = {
+        ...collaborators,
+        mayRun: async () =>
+          !closing &&
+          (await authority()) === 'local' &&
+          (!previousMayRun || (await previousMayRun())),
+      }
+    } catch (error) {
+      await custody?.dispose().catch(() => {})
       throw error
     }
-    const registry = createGaSelectorRegistry(bindings.createSelector)
-    let pipeline: GaRequestPipeline | null = null
-    let reauthorize: ReturnType<typeof createGaReauthorize> | null = null
-    let disposed: Promise<void> | null = null
-
     return {
       runtime,
       async start(input) {
-        if (disposed) throw new Error('The location services are disposed')
-        await assertServingAdmission(opened, bindings.now)
+        if (closing) throw new Error('The location services are disposed')
+        if (started) throw new Error('The location services already started')
+        started = true
         const location = input.runtime
-        const routes = createGaRouteBook()
-        pipeline = await bindings.createPipeline({
-          repository,
-          runtime: location,
-          send: input.send,
-          generation: input.generation,
-          overrides,
-          routes,
-        })
-        const state = createGaAccountStateSource({
-          repository,
-          registry,
-          generation: input.generation,
-          settings: () =>
-            gaSettingsOf(location.operatorSettings.get(), location.dump),
-          status: () => ({
-            checkedAt: null,
-            quotaBackoffUntil: null,
-            routingAuthoritative: true,
-          }),
-          route: (scope) => routes.route(scope),
-          ...(overrides.observeAccountSnapshot
-            ? { observe: overrides.observeAccountSnapshot }
-            : {}),
-        })
-        const started = pipeline
-        const refreshAccounts = () => started.refreshAccounts()
-        reauthorize = createGaReauthorize({
-          repository,
-          overrides,
-          afterChange: refreshAccounts,
-        })
-        const checkQuota = started.refreshQuota
-        const menu = createGaLocationMenu({
+        const settings = operatorMenuSettings(location.operatorSettings)
+        const recoveryMenu = createAntigravityCommandMenu({
+          source: 'sections',
           commands: await loadCommonAuthCommands(),
-          repository,
-          runtime: location,
-          reauthorize,
-          ...(custody ? { vault: custody.menuSection() } : {}),
-          ...(checkQuota ? { refreshQuota: (refs) => checkQuota(refs) } : {}),
+          sections: {
+            accounts: {
+              title: 'Accounts',
+              build: async () => ({
+                lines: [
+                  'Account access is unavailable. Open Vault to inspect or recover enrollment.',
+                ],
+                items: [],
+                actions: [],
+              }),
+            },
+            quota: {
+              title: 'Quota',
+              build: async () => ({
+                lines: ['No quota reading is available.'],
+                items: [],
+                actions: [],
+              }),
+            },
+            ...antigravitySettingsSections(settings),
+          },
+          diagnostics: diagnosticsMenuSection({
+            settings: location.operatorSettings,
+            dump: location.dump,
+            applyLogLevel: () => location.applyOperatorSettings(),
+          }),
+          ...(custody ? { extras: [custody.menuSection()] } : {}),
         })
-        const commands = createGaMenuCommandService({
-          menu,
-          notify: input.notify,
-          afterApply: refreshAccounts,
-        })
-        return { state, commands, execute: started.execute }
+        const recovery: Serving = {
+          execute: async () => {
+            throw new Error(VAULT_ACCOUNT_REMEDY)
+          },
+          state: {
+            read: async ({ signal }) => {
+              if (signal.aborted) throw abortError(signal)
+              return {
+                readSeq: nextReadSeq(),
+                accounts: { kind: 'complete', rows: [] },
+                route: null,
+                status: {
+                  checkedAt: null,
+                  quotaBackoffUntil: null,
+                  routingAuthoritative: false,
+                },
+                settings: gaSettingsOf(
+                  location.operatorSettings.get(),
+                  location.dump,
+                ),
+              }
+            },
+          },
+          commands: createGaMenuCommandService({
+            menu: recoveryMenu,
+            notify: input.notify,
+          }),
+        }
+        const local = (): Promise<Serving> => {
+          localPromise ??= (async () => {
+            const repository = await getRepository()
+            const opened = await repositoryPromise
+            if (!opened)
+              throw new Error('The local repository was not constructed')
+            await assertServingAdmission(opened, bindings.now)
+            await assertLocal()
+            let pipeline: GaRequestPipeline | undefined
+            let pendingReauthorization:
+              | ReturnType<typeof createGaReauthorize>
+              | undefined
+            try {
+              const routes = createGaRouteBook()
+              pipeline = await bindings.createPipeline({
+                repository,
+                runtime: location,
+                send: input.send,
+                generation: input.generation,
+                overrides,
+                routes,
+                assertAdmission: assertLocal,
+              })
+              const started = pipeline
+              const refreshAccounts = async () => {
+                await assertLocal()
+                await started.refreshAccounts()
+              }
+              pendingReauthorization = createGaReauthorize({
+                repository,
+                assertAdmission: assertLocal,
+                overrides,
+                afterChange: refreshAccounts,
+              })
+              const checkQuota = started.refreshQuota
+              const menu = createGaLocationMenu({
+                commands: await loadCommonAuthCommands(),
+                repository,
+                runtime: location,
+                reauthorize: pendingReauthorization,
+                ...(custody ? { vault: custody.menuSection() } : {}),
+                ...(checkQuota
+                  ? {
+                      refreshQuota: async (refs) => {
+                        await assertLocal()
+                        return checkQuota(refs)
+                      },
+                    }
+                  : {}),
+              })
+              localPipeline = started
+              reauthorize = pendingReauthorization
+              return {
+                state: createGaAccountStateSource({
+                  repository,
+                  registry,
+                  generation: input.generation,
+                  nextReadSeq,
+                  settings: () =>
+                    gaSettingsOf(
+                      location.operatorSettings.get(),
+                      location.dump,
+                    ),
+                  status: () => ({
+                    checkedAt: null,
+                    quotaBackoffUntil: null,
+                    routingAuthoritative: true,
+                  }),
+                  route: (scope) => routes.route(scope),
+                  ...(overrides.observeAccountSnapshot
+                    ? { observe: overrides.observeAccountSnapshot }
+                    : {}),
+                }),
+                commands: createGaMenuCommandService({
+                  menu,
+                  notify: input.notify,
+                  afterApply: () => refreshSelectedSource(),
+                }),
+                execute: started.execute,
+              }
+            } catch (error) {
+              await pendingReauthorization?.dispose().catch(() => {})
+              await pipeline?.dispose().catch(() => {})
+              await location.replaceAccounts(null).catch(() => {})
+              throw error
+            }
+          })().catch((error) => {
+            localPromise = undefined
+            throw error
+          })
+          return localPromise
+        }
+        const vault = (): Promise<Serving> => {
+          if (!custody)
+            return Promise.reject(new Error('Vault custody is unavailable'))
+          vaultPromise ??= (async () => {
+            const created = await createGaVaultLocationServices({
+              custody,
+              overrides,
+              bindings,
+              nextReadSeq,
+              afterApply: refreshSelectedSource,
+              assertAdmission: async () => {
+                const selected = await authority()
+                if (closing || selected !== 'vault')
+                  throw new Error(VAULT_ACCOUNT_REMEDY)
+              },
+            })
+            try {
+              const serving = await created.start(input)
+              vaultServices = created
+              return serving
+            } catch (error) {
+              await created.dispose().catch(() => {})
+              throw error
+            }
+          })().catch((error) => {
+            vaultPromise = undefined
+            throw error
+          })
+          return vaultPromise
+        }
+        const choose = async (
+          purpose: 'execute' | 'view',
+        ): Promise<Serving> => {
+          if (closing) throw new Error('The location services are disposed')
+          const selected = await authority()
+          if (closing) throw new Error('The location services are disposed')
+          if (selected === 'local') return local()
+          if (selected === 'unreadable') {
+            if (purpose === 'execute') throw new Error(VAULT_ACCOUNT_REMEDY)
+            return recovery
+          }
+          try {
+            return await vault()
+          } catch (error) {
+            if (purpose === 'execute') throw error
+            return recovery
+          }
+        }
+        let reads: Promise<unknown> = Promise.resolve()
+        return {
+          execute: (job, context) =>
+            run(async () => {
+              if (context.signal.aborted) throw context.signal.reason
+              return (await choose('execute')).execute(job, context)
+            }),
+          commands: {
+            apply: (request) =>
+              run(async () => {
+                if (request.signal.aborted) throw request.signal.reason
+                return (await choose('view')).commands.apply(request)
+              }),
+            open: (request) =>
+              run(async () => {
+                if (request.signal.aborted) throw request.signal.reason
+                return (await choose('view')).commands.open(request)
+              }),
+          },
+          state: {
+            read(request) {
+              return run(() => {
+                const pending = reads.then(async () => {
+                  if (closing)
+                    throw new Error('The location services are disposed')
+                  if (request.signal.aborted) throw request.signal.reason
+                  for (let attempt = 0; attempt < 2; attempt++) {
+                    const before = await authority()
+                    const answer = await (await choose('view')).state.read(
+                      request,
+                    )
+                    if (before === (await authority())) return answer
+                  }
+                  throw new Error(
+                    'Account authority changed while reading state',
+                  )
+                })
+                reads = pending.catch(() => undefined)
+                return pending
+              })
+            },
+          },
+        }
       },
       dispose() {
-        disposed ??= (async () => {
-          const active = pipeline
-          pipeline = null
+        closing = true
+        disposal ??= (async () => {
+          await Promise.allSettled([
+            localPromise,
+            vaultPromise,
+            repositoryPromise,
+          ])
           try {
-            await reauthorize?.dispose()
-            if (active) await active.dispose()
+            const resources = Promise.allSettled([
+              reauthorize?.dispose(),
+              localPipeline?.dispose(),
+              vaultServices?.dispose(),
+            ])
+            await Promise.allSettled([...inFlight])
+            const results = await resources
+            while (inFlight.size > 0) await Promise.allSettled([...inFlight])
+            const failure = results.find(
+              (result) => result.status === 'rejected',
+            )
+            if (failure?.status === 'rejected') throw failure.reason
           } finally {
-            await custody?.dispose()
-            await repository.dispose()
+            try {
+              await custody?.dispose()
+            } finally {
+              const opened = await repositoryPromise?.catch(() => undefined)
+              await opened?.repository.dispose()
+            }
           }
         })()
-        return disposed
+        return disposal
       },
     }
   }
@@ -2008,23 +2335,28 @@ export interface GaAccountSlot {
  * account it is handed through this activation's manager.
  */
 export function createGaRuntimeCollaborators(input: {
-  readonly repository: AccountRepository
+  readonly assertAdmission?: () => Promise<void>
+  readonly getRepository: () => Promise<AccountRepository>
   readonly overrides: GaPluginOverrides
   readonly accounts: GaAccountSlot
   readonly now: () => number
 }): GaRuntimeCollaborators {
   return {
     quotaSnapshots: createMemoryQuotaSnapshots(),
-    fetchAccountQuota: createGaFetchAccountQuota({
-      repository: input.repository,
-      now: input.now,
-      overrides: input.overrides,
-      // The location logger exists only once the runtime is built; until
-      // then (no check can run before start) records are dropped.
-      logger: {
-        debug: (...args) => input.accounts.quotaLogger?.debug(...args),
-      },
-    }),
+    fetchAccountQuota: async (account, signal) => {
+      const repository = await input.getRepository()
+      return createGaFetchAccountQuota({
+        repository,
+        ...(input.assertAdmission
+          ? { assertAdmission: input.assertAdmission }
+          : {}),
+        now: input.now,
+        overrides: input.overrides,
+        logger: {
+          debug: (...args) => input.accounts.quotaLogger?.debug(...args),
+        },
+      })(account, signal)
+    },
     refreshToken: async (_auth, account) => {
       const manager = input.accounts.current
       if (manager === null || !manager.getAccounts().includes(account))
@@ -2067,9 +2399,10 @@ export function createGaLocationServicesForHost(
       loadStoreModules: loadCommonAuthStoreModules,
       resolveAccountFile: getStoragePath,
       now: Date.now,
-      runtime: ({ repository, overrides }) =>
+      runtime: ({ getRepository, assertAdmission, overrides }) =>
         createGaRuntimeCollaborators({
-          repository,
+          getRepository,
+          assertAdmission,
           overrides,
           accounts,
           now: Date.now,
@@ -2094,6 +2427,12 @@ export function createGaLocationServicesForHost(
   }
 }
 
-/** The GA location services of a host that offers no vault custody. */
-export const createGaLocationServices: GaLocationServicesFactory =
-  createGaLocationServicesForHost()
+/** The connection API belongs to this setup context, not a module-wide host. */
+export const createGaLocationServices: GaLocationServicesFactory = (input) => {
+  const readHostSlot = input.connections
+    ? createGaHostSlotReader(input.connections, 'google')
+    : async () => {
+        throw new Error('The host integration connection API is unavailable')
+      }
+  return createGaLocationServicesForHost({ readHostSlot })(input)
+}

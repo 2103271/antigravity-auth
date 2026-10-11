@@ -336,7 +336,19 @@ type Mode =
 type Stage = 'project' | 'main' | 'thinking' | 'cache'
 
 async function runScenario(mode: Mode, stage: Stage = 'project') {
+  const startedAt = performance.now()
+  const phase = (name: string) =>
+    console.log(
+      JSON.stringify({
+        localGrantPhase: name,
+        mode,
+        stage,
+        elapsedMs: performance.now() - startedAt,
+      }),
+    )
+  phase('initializing')
   const pool = await freshPool(mode !== 'identity')
+  phase('initialized')
   let manager: AccountManager | undefined
   let cleanupAllowed = true
   let writes = 0
@@ -357,7 +369,9 @@ async function runScenario(mode: Mode, stage: Stage = 'project') {
   let ref = pool.ref
   const writer = async (operation: Operation) => {
     cleanupAllowed = false
+    phase(`writer-${operation}-start`)
     await runWriter(pool.dir, pool.paths, ref, operation)
+    phase(`writer-${operation}-finish`)
     cleanupAllowed = true
     writes++
     const row = await rowFor(pool.repository, ref)
@@ -661,6 +675,7 @@ async function runScenario(mode: Mode, stage: Stage = 'project') {
         stage === 'thinking'
           ? 'claude-opus-4-6-thinking'
           : 'gemini-3.7-flash-medium'
+      phase('execute-start')
       const response = await createGaJobExecutor(executor)(
         {
           url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -678,7 +693,9 @@ async function runScenario(mode: Mode, stage: Stage = 'project') {
           },
         },
       )
+      phase('headers')
       const responseBody = await response.text()
+      phase('body-finished')
       const current = await rowFor(pool.repository, ref)
       console.log(
         JSON.stringify({
@@ -723,11 +740,15 @@ async function runScenario(mode: Mode, stage: Stage = 'project') {
         signal: controller.signal,
       }
     } finally {
-      executor.dispose()
+      phase('executor-cleanup-start')
+      await executor.dispose()
+      phase('executor-cleanup-finish')
     }
   } finally {
     await manager?.dispose()
+    phase('manager-cleanup-finish')
     await pool.repository.dispose()
+    phase('repository-cleanup-finish')
     if (cleanupAllowed) await rm(pool.dir, { recursive: true, force: true })
     else console.log(JSON.stringify({ retainedFixture: pool.dir }))
   }
@@ -753,7 +774,7 @@ it('admits a freshly initialized healthy row through the real shared executor', 
   expect(result.sent.map((send) => send.authorization)).toEqual([
     `Bearer ${TOKEN_A}`,
   ])
-  expect(result.sent[0]?.signal).toBe(result.signal)
+  expect(result.sent[0]?.signal).toBeInstanceOf(AbortSignal)
   expect(result.checks).toBe(1)
   expect(result.adoptions).toBe(0)
   expect(result.exchangeCalls).toEqual(['synthetic-refresh'])
@@ -937,22 +958,42 @@ it.each([
 })
 
 it('quota refuses provider metadata cleared after its attributed refresh before authorization returns', async () => {
+  const startedAt = performance.now()
+  const phase = (name: string) =>
+    console.log(
+      JSON.stringify({
+        quotaInterleaving: name,
+        elapsedMs: performance.now() - startedAt,
+      }),
+    )
+  phase('initializing')
   const pool = await freshPool()
+  phase('initialized')
   let cleanupAllowed = true
   try {
     let reads = 0
     const current = await rowFor(pool.repository, pool.ref)
     if (!current?.credential?.expiresAt) throw new Error('missing expiry')
     const repository: Pick<AccountRepository, 'read' | 'refresh'> = {
-      refresh: (ref, options) => pool.repository.refresh(ref, options),
+      async refresh(ref, options) {
+        phase('refresh-start')
+        const result = await pool.repository.refresh(ref, options)
+        phase('refresh-finish')
+        return result
+      },
       async read() {
         reads++
+        phase(`read-${reads}-start`)
         if (reads === 2) {
           cleanupAllowed = false
+          phase('writer-start')
           await runWriter(pool.dir, pool.paths, pool.ref, 'clear')
+          phase('writer-finish')
           cleanupAllowed = true
         }
-        return pool.repository.read()
+        const result = await pool.repository.read()
+        phase(`read-${reads}-finish`)
+        return result
       },
     }
     expect(

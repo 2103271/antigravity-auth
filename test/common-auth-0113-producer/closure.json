@@ -4,6 +4,10 @@
   "resolution": "Resolve relative .js specifiers from declarations to .d.ts; runtime edges retain .js. Lists are deduplicated. Files absent from imports have no static import/re-export edges.",
   "nonlocalStaticImports": [
     "@cortexkit/claustrum-client",
+    "@opencode/plugin",
+    "@opencode/plugin/promise/integration",
+    "@opencode/plugin/promise/registration",
+    "@opencode/plugin/promise/session",
     "node:async_hooks",
     "node:child_process",
     "node:crypto",
@@ -210,15 +214,43 @@
     "logger/engine.js": ["./redact.js", "node:fs"],
     "logger/index.d.ts": ["./capture-sink.js", "./engine.js", "./redact.js"],
     "logger/index.js": ["./capture-sink.js", "./engine.js", "./redact.js"],
+    "opencode2/index.d.ts": [
+      "./errors.js",
+      "./install.js",
+      "./integration.js",
+      "./sse.js",
+      "./types.js"
+    ],
+    "opencode2/index.js": [
+      "./errors.js",
+      "./install.js",
+      "./integration.js",
+      "./sse.js"
+    ],
+    "opencode2/install.d.ts": ["./types.js"],
+    "opencode2/install.js": ["./errors.js", "./integration.js", "./sse.js"],
+    "opencode2/integration.d.ts": [
+      "@opencode/plugin",
+      "@opencode/plugin/promise/integration",
+      "@opencode/plugin/promise/registration"
+    ],
+    "opencode2/types.d.ts": [
+      "@opencode/plugin",
+      "@opencode/plugin/promise/session"
+    ],
     "quota/codec.js": ["./map.js", "./merge.js"],
+    "quota/format.d.ts": ["./projection.js"],
+    "quota/format.js": ["./map.js"],
     "quota/index.d.ts": [
       "./codec.js",
+      "./format.js",
       "./map.js",
       "./merge.js",
       "./projection.js"
     ],
     "quota/index.js": [
       "./codec.js",
+      "./format.js",
       "./map.js",
       "./merge.js",
       "./projection.js"
@@ -484,6 +516,18 @@
     ],
     "store/torn.d.ts": ["./identity.js", "./schema.js"],
     "store/torn.js": ["./identity.js", "./schema.js"],
-    "tui/index.js": ["node:path"]
+    "tui/index.js": ["node:path"],
+    "pi-slot/index.d.ts": ["./slot.js"],
+    "pi-slot/index.js": ["./slot.js"],
+    "pi-slot/lock.js": ["node:fs", "node:fs/promises"],
+    "pi-slot/slot.js": [
+      "../fs/atomic-write.js",
+      "./lock.js",
+      "node:crypto",
+      "node:fs",
+      "node:fs/promises",
+      "node:path",
+      "node:timers/promises"
+    ]
   }
 }

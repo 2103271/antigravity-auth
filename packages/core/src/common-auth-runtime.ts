@@ -114,3 +114,10 @@ export async function loadCommonAuthStoreModules(): Promise<CommonAuthStoreModul
   ])
   return { store, fs }
 }
+
+export type CommonAuthPiSlotModule =
+  typeof import('./common-auth-embedded/pi-slot/index.js')
+
+/** Load common-auth's Pi auth.json editor outside UI bundles; its lock coordinates with Pi's own login writers. */
+export const loadCommonAuthPiSlot: () => Promise<CommonAuthPiSlotModule> =
+  memoize(() => import('./common-auth-embedded/pi-slot/index.js'))

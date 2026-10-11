@@ -36,6 +36,7 @@ import {
   type QuotaManager,
   resolveQuotaGroup,
   type TokenBucketTracker,
+  VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
 import {
   ANTIGRAVITY_ENDPOINT_FALLBACKS,
@@ -87,6 +88,10 @@ import {
   isLocalGrantError,
   LocalGrantSupersededError,
 } from './local-grant'
+import {
+  createRequestCancellation,
+  retainResponseLifetime,
+} from './request-cancellation'
 
 /**
  * Wait before retrying the same selection after its first 429.
@@ -414,6 +419,8 @@ export type RequestDebug = Pick<
  * becomes a token and project.
  */
 export interface RequestServicesDeps<A extends RequestAccountRow> {
+  /** Check the persistent account source before each operation that uses credentials. */
+  readonly assertAdmission?: () => Promise<void>
   readonly config: AntigravityConfig
   readonly accounts: RequestAccountPool<A>
   readonly credentials: RequestCredentials<A>
@@ -532,7 +539,7 @@ export interface AntigravityRequestExecutor {
     options?: RequestExecuteOptions,
   ): Promise<Response>
   /** Releases retry and warmup bookkeeping. */
-  dispose(): void
+  dispose(): Promise<void>
 }
 
 /**
@@ -746,6 +753,10 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
   const retryState: RetryState = createRetryState()
   const warmupState: WarmupState = createWarmupState()
+  const shutdown = new AbortController()
+  const inFlight = new Set<Promise<unknown>>()
+  const bufferedOverflow = new WeakSet<Response>()
+  let disposePromise: Promise<void> | undefined
 
   /** Reports a 401 served to an auxiliary send against its admission. */
   const reportVault401 = (
@@ -777,6 +788,12 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     init?: RequestInit,
     options: RequestExecuteOptions = {},
   ): Promise<Response> {
+    const assertAdmission = async (): Promise<void> => {
+      init?.signal?.throwIfAborted()
+      await deps.assertAdmission?.()
+      init?.signal?.throwIfAborted()
+    }
+    await assertAdmission()
     // Normalize Request/URL inputs to (urlString, init) so the string-based
     // transform pipeline sees the real method/headers/body. Without this,
     // fetch(new Request(...)) would carry its payload on the Request object
@@ -850,7 +867,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       const urlString = typeof input === 'string' ? input : toUrlString(input)
       const modelFromUrl = extractModelFromUrl(urlString) ?? 'unknown'
       return createNoAccountResponse(
-        'No Antigravity accounts configured. Run `opencode auth login`.',
+        credentials.domain === 'vault'
+          ? VAULT_ACCOUNT_REMEDY
+          : 'No Antigravity accounts configured. Run `opencode auth login`.',
         modelFromUrl,
       )
     }
@@ -973,6 +992,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     let localRecaptureUsed = false
 
     while (true) {
+      await assertAdmission()
       checkAborted()
       const accountCount = accountManager.getAccountCount()
       const routingDecision = resolveHeaderRoutingDecision(
@@ -1305,6 +1325,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       ): Promise<NonNullable<typeof localGrant>> => {
         if (credentials.domain !== 'local' || !auth.access)
           throw new Error('Local credentials were not resolved')
+        await assertAdmission()
         const context = await credentials.ensureProject(auth)
         // A project cache may carry an older bearer. Only the token fixed
         // before this await belongs to the newly prepared request.
@@ -1348,6 +1369,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
         if (accessTokenExpired(authRecord)) {
           try {
+            await assertAdmission()
             const refreshed = await credentials.refresh(account)
             if (!refreshed) {
               const { failures, shouldCooldown, cooldownMs } =
@@ -1513,6 +1535,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         sendInit: RequestInit,
         preparedProjectId: string,
       ): Promise<{ init: RequestInit; admission?: RequestSendAdmission }> => {
+        await assertAdmission()
         if (credentials.domain === 'vault') {
           const admission = await credentials.admit({
             account: selected,
@@ -1768,6 +1791,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       let totalCapacityRetries = 0
 
       while (!shouldSwitchAccount) {
+        await assertAdmission()
         let forceThinkingRecovery = false
         let capacityRetryCount = 0
         let lastEndpointIndex = -1
@@ -1895,6 +1919,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               }
             }
 
+            await assertAdmission()
             if (config.account_selection_strategy === 'hybrid') {
               tokenConsumed = trackers.token.consume(account.index)
             }
@@ -2473,6 +2498,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                   )
                   // Only the clone was inspected; the host must receive the
                   // original overflow payload, status, headers and unread body.
+                  bufferedOverflow.add(response)
                   return response
                 }
               }
@@ -2786,12 +2812,61 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     }
   }
 
-  function dispose(): void {
-    retryState.dispose()
-    warmupState.dispose()
+  function dispose(): Promise<void> {
+    disposePromise ??= (async () => {
+      shutdown.abort(new Error('The Antigravity request executor is disposed'))
+      // A refresh that already exchanged tokens must finish its owned store write.
+      while (inFlight.size > 0) await Promise.allSettled([...inFlight])
+      retryState.dispose()
+      warmupState.dispose()
+    })()
+    return disposePromise
   }
 
-  return { execute, dispose }
+  return {
+    execute(input, init, requestOptions) {
+      if (shutdown.signal.aborted)
+        return Promise.reject(
+          new Error('The Antigravity request executor is disposed'),
+        )
+      const requestedSignal =
+        init?.signal ?? (input instanceof Request ? input.signal : undefined)
+      const cancellation = createRequestCancellation(
+        requestedSignal
+          ? [requestedSignal, shutdown.signal]
+          : [shutdown.signal],
+      )
+      const pending = execute(
+        input,
+        { ...init, signal: cancellation.signal },
+        requestOptions,
+      ).then(
+        async (response) => {
+          // Overflow classification already consumed a clone to wire EOF.
+          // Preserve the original response and leave its buffered body unread.
+          if (bufferedOverflow.has(response)) {
+            cancellation.release()
+            return response
+          }
+          const retained = await retainResponseLifetime(response, cancellation)
+          inFlight.add(retained.settled)
+          void retained.settled.then(() => inFlight.delete(retained.settled))
+          return retained.response
+        },
+        (error: unknown) => {
+          cancellation.release()
+          throw error
+        },
+      )
+      inFlight.add(pending)
+      void pending.then(
+        () => inFlight.delete(pending),
+        () => inFlight.delete(pending),
+      )
+      return pending
+    },
+    dispose,
+  }
 }
 
 interface RateLimitBodyInfo {

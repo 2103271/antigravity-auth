@@ -33,6 +33,7 @@ const {
   parseGeminiSse,
   resolvePiAntigravityModel,
   streamCortexKitAntigravity,
+  createCortexKitAntigravityVaultStream,
   updateUsage,
 } = await import('./stream.ts')
 
@@ -871,5 +872,65 @@ describe('updateUsage', () => {
     expect(output.usage.input).toBe(100)
     expect(output.usage.cacheRead).toBe(0)
     expect(output.usage.output).toBe(10)
+  })
+})
+
+describe('vault native-slot admission', () => {
+  it.each([
+    undefined,
+    'synthetic-local-oauth-access',
+    'antigravity-vault-custody-extra',
+  ])('rejects a missing or foreign resolved credential before vault dispatch (%s)', async (apiKey) => {
+    const send = mock(async () => sseResponse([]))
+    const stream = createCortexKitAntigravityVaultStream(
+      send,
+      'antigravity-vault-custody',
+    )
+    const result = await stream(
+      fakeModel(),
+      { messages: [] },
+      { ...(apiKey === undefined ? {} : { apiKey }) },
+    ).result()
+    expect(result.stopReason).toBe('error')
+    expect(result.errorMessage).toContain('credential slot is not synchronized')
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('uses only the served vault credential when Pi resolves the exact placeholder', async () => {
+    fetchWithAgyCliTransportMock.mockResolvedValueOnce(
+      sseResponse([
+        'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"vault okay"}]},"finishReason":"STOP"}]}}\n\n',
+      ]),
+    )
+    const send: import('./stream.ts').AntigravityVaultSend = async (
+      dispatch,
+      signal,
+    ) =>
+      dispatch(
+        {
+          accessToken: 'synthetic-served-vault-token',
+          projectId: 'synthetic-served-project',
+        },
+        signal,
+      )
+    const stream = createCortexKitAntigravityVaultStream(
+      send,
+      'antigravity-vault-custody',
+    )
+    const result = await stream(
+      fakeModel(),
+      { messages: [] },
+      { apiKey: 'antigravity-vault-custody' },
+    ).result()
+    expect(result.stopReason).toBe('stop')
+    const init = fetchWithAgyCliTransportMock.mock.calls.at(-1)?.[1] as
+      | RequestInit
+      | undefined
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer synthetic-served-vault-token',
+    )
+    expect(String(init?.body)).toContain('synthetic-served-project')
+    expect(String(init?.body)).not.toContain('antigravity-vault-custody')
+    expect(ensureProjectContextMock).not.toHaveBeenCalled()
   })
 })

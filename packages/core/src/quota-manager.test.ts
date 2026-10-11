@@ -213,6 +213,27 @@ describe('aggregateQuota', () => {
 })
 
 describe('refreshAccount', () => {
+  it('records successful fetch completion time and does not restamp a cached reading', async () => {
+    const harness = makeHarness()
+    let now = 1_000
+    const manager = track(
+      createQuotaManager({
+        keyOf: keyOfAccount,
+        now: () => now,
+        fetchAccountQuota: async (...args) => {
+          const result = await harness.fetch(...args)
+          now = 2_000
+          return result
+        },
+      }),
+    )
+    const account = makeAccount({ email: 'dated@example.com' })
+    const result = await manager.refreshAccount(account, { index: 0 })
+    expect(result.checkedAt).toBe(2_000)
+    now = 10_000
+    expect(manager.getCached(account)?.checkedAt).toBe(2_000)
+  })
+
   it('attempts the fetch and stores the result indexed by stable key', async () => {
     const harness = makeHarness()
     const manager = track(

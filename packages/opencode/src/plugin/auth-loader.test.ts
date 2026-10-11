@@ -47,6 +47,7 @@ function createLifecycle() {
     getAccountManager: () => null,
     replaceAccountRuntime: mock(async (manager, queue) => {
       replacements.push({ manager, queue })
+      return true
     }),
     register: mock((disposable) => {
       disposables.push(disposable)
@@ -54,6 +55,21 @@ function createLifecycle() {
     dispose: mock(async () => {
       for (const disposable of disposables) await disposable.dispose()
     }),
+  }
+  return { lifecycle, replacements }
+}
+
+function createOwnedLifecycle() {
+  const replacements: Array<{ manager: unknown; queue: unknown }> = []
+  const lifecycle = createPluginLifecycle({
+    sessionRegistry: { clear() {} },
+    shutdownDiskSignatureCache: async () => {},
+    clearFetchState() {},
+  })
+  const replace = lifecycle.replaceAccountRuntime.bind(lifecycle)
+  lifecycle.replaceAccountRuntime = async (manager, queue) => {
+    replacements.push({ manager, queue })
+    return replace(manager, queue)
   }
   return { lifecycle, replacements }
 }
@@ -529,12 +545,12 @@ describe('createAuthLoader on the account store', () => {
 
   it('routes with the core manager over the store and never reads the pool file', async () => {
     const { root, open } = await activeStore()
+    const { lifecycle, replacements } = createOwnedLifecycle()
     try {
       const loadAccounts = mock(async () => {
         throw new Error('the retired pool file must not be read')
       })
       const clearAccounts = mock(async () => {})
-      const { lifecycle, replacements } = createLifecycle()
       const managers: unknown[] = []
       const storeQueues: ProactiveRefreshQueue[] = []
       const loader = createAuthLoader({
@@ -586,7 +602,9 @@ describe('createAuthLoader on the account store', () => {
       expect(storeQueues).toHaveLength(1)
       expect(replacements).toEqual([{ manager, queue: storeQueues[0] }])
       await lifecycle.dispose()
+      expect(storeQueues[0]?.getStats().isRunning).toBe(false)
     } finally {
+      await lifecycle.dispose()
       rmSync(root, { recursive: true, force: true })
     }
   })
@@ -601,9 +619,9 @@ describe('createAuthLoader on the account store', () => {
         expiresAt: Date.now() + 3_600_000,
       }
     })
+    const { lifecycle } = createOwnedLifecycle()
     try {
       const authSet = mock(async () => {})
-      const { lifecycle } = createLifecycle()
       const managers: CoreAccountManager[] = []
       const refreshers: ProactiveRefreshDependencies['refreshToken'][] = []
       const loader = createAuthLoader({
@@ -652,6 +670,7 @@ describe('createAuthLoader on the account store', () => {
       expect(authSet).not.toHaveBeenCalled()
       await lifecycle.dispose()
     } finally {
+      await lifecycle.dispose()
       rmSync(root, { recursive: true, force: true })
     }
   })
@@ -860,5 +879,50 @@ describe('createAuthLoader on the account store', () => {
     expect(loadAccounts).not.toHaveBeenCalled()
     expect(replacements).toEqual([])
     expect(showToast).toHaveBeenCalled()
+  })
+})
+
+describe('enrollment authority at loader and request start', () => {
+  it('does not open local accounts or read the native login while vault authority is active', async () => {
+    const { createAuthLoader } = await import('./auth-loader')
+    const { createPluginLifecycle } = await import('./lifecycle')
+    const localOpen = mock(async () => {
+      throw new Error('local store was touched')
+    })
+    const localAuth = mock(async () => {
+      throw new Error('native login was touched')
+    })
+    const vaultFetch = mock(async () => new Response('vault-only'))
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      clearFetchState() {},
+      shutdownDiskSignatureCache: async () => {},
+    })
+    const loader = createAuthLoader({
+      client: {} as never,
+      providerId: 'google',
+      config: {} as never,
+      lifecycle,
+      readAuthority: async () => 'vault',
+      createFetch: () => {
+        throw new Error('local interceptor was constructed')
+      },
+      createVaultFetch: async () => ({ fetch: vaultFetch, dispose() {} }),
+      dependencies: { openAccountStore: localOpen },
+    })
+    try {
+      const loaded = await loader(localAuth, { models: {} } as never)
+      if (typeof loaded.fetch !== 'function')
+        throw new Error('no fetch runtime')
+      const response = await loaded.fetch(
+        'https://generativelanguage.googleapis.com/example',
+      )
+      expect(await response.text()).toBe('vault-only')
+      expect(vaultFetch).toHaveBeenCalledTimes(1)
+      expect(localAuth).not.toHaveBeenCalled()
+      expect(localOpen).not.toHaveBeenCalled()
+    } finally {
+      await lifecycle.dispose()
+    }
   })
 })

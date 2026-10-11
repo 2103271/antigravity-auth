@@ -50,6 +50,7 @@ export interface ProactiveRefreshDependencies {
 
 /** Configuration for the proactive refresh queue */
 export interface ProactiveRefreshConfig {
+  mayRun?: () => Promise<boolean>
   /** Enable proactive token refresh (default: true) */
   enabled: boolean
   /** Seconds before expiry to trigger proactive refresh (default: 1800 = 30 minutes) */
@@ -90,6 +91,7 @@ export class ProactiveRefreshQueue {
   private readonly refresh: RefreshQueueTokenRefresher
   private accountManager: RefreshQueueAccountView | null = null
   private inflightRefresh: Promise<void> | null = null
+  private disposed = false
 
   private state: RefreshQueueState = {
     isRunning: false,
@@ -203,6 +205,7 @@ export class ProactiveRefreshQueue {
   }
 
   private async performRefreshCheck(): Promise<void> {
+    if (this.config.mayRun && !(await this.config.mayRun())) return
     if (this.state.isRefreshing) {
       // Already refreshing - skip this iteration
       return
@@ -228,8 +231,9 @@ export class ProactiveRefreshQueue {
 
       // Refresh accounts serially to avoid concurrent refresh storms
       for (const account of accountsToRefresh) {
+        if (this.config.mayRun && !(await this.config.mayRun())) break
         if (!this.state.isRunning) {
-          // Queue was stopped - abort
+          // Recheck shutdown after the asynchronous authority read.
           break
         }
 
@@ -287,7 +291,7 @@ export class ProactiveRefreshQueue {
    * Start the background refresh queue.
    */
   start(): void {
-    if (this.state.isRunning) {
+    if (this.disposed || this.state.isRunning) {
       return
     }
 
@@ -352,6 +356,7 @@ export class ProactiveRefreshQueue {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true
     this.stop()
     await this.inflightRefresh
   }

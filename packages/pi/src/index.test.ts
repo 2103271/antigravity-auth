@@ -2,18 +2,29 @@ import { describe, expect, it, mock } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { loadCommonAuthClaustrum } from '@cortexkit/antigravity-auth-core'
 import {
   type ExtensionAPI,
   ModelRegistry,
   ModelRuntime,
 } from '@earendil-works/pi-coding-agent'
 
-import cortexKitPiAntigravityAuth from './index.ts'
+import cortexKitPiAntigravityAuth, {
+  CUSTODY_PROVIDER_KEY_MARKER,
+} from './index.ts'
+import {
+  getPiAntigravityVaultDir,
+  getPiAntigravityVaultModeFile,
+} from './paths.ts'
+import { PI_ANTIGRAVITY_ENROLLMENT_NAME, PiVaultSetup } from './vault-setup.ts'
 
 describe('Pi Antigravity model catalog', () => {
-  it('exposes the live GPT-OSS route but not unsupported image-output chat models', () => {
+  it('exposes the live GPT-OSS route but not unsupported image-output chat models', async () => {
     const registerProvider = mock()
-    cortexKitPiAntigravityAuth({ registerProvider } as never)
+    await cortexKitPiAntigravityAuth({
+      registerProvider,
+      registerCommand: mock(),
+    } as never)
 
     expect(registerProvider).toHaveBeenCalledTimes(1)
     const [providerId, config] = registerProvider.mock.calls[0] as [
@@ -93,7 +104,10 @@ it('replaces the native Google catalog and reads only the google OAuth credentia
 
     const registerProvider: ExtensionAPI['registerProvider'] =
       registry.registerProvider.bind(registry)
-    cortexKitPiAntigravityAuth({ registerProvider } as never)
+    await cortexKitPiAntigravityAuth({
+      registerProvider,
+      registerCommand: mock(),
+    } as never)
 
     const models = registry
       .getAll()
@@ -117,6 +131,73 @@ it('replaces the native Google catalog and reads only the google OAuth credentia
     )
     expect(await readFile(authPath, 'utf8')).toBe(credentials)
   } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+it('the production default entry selects the vault stream and registers the shared menu', async () => {
+  const directory = await mkdtemp(
+    join(
+      process.platform === 'win32' ? tmpdir() : '/tmp',
+      'antigravity-pi-default-',
+    ),
+  )
+  const previous = process.env.PI_ANTIGRAVITY_AUTH_FILE
+  process.env.PI_ANTIGRAVITY_AUTH_FILE = join(directory, 'accounts.json')
+  try {
+    const { mkdir } = await import('node:fs/promises')
+    const { dirname } = await import('node:path')
+    const modeFile = getPiAntigravityVaultModeFile()
+    await mkdir(dirname(modeFile), { recursive: true, mode: 0o700 })
+    await writeFile(
+      modeFile,
+      JSON.stringify({
+        version: 1,
+        mode: 'custody',
+        routeId: 'synthetic-route',
+      }),
+      { mode: 0o600 },
+    )
+    const claustrum = await loadCommonAuthClaustrum()
+    const setup = new PiVaultSetup({
+      claustrum,
+      stateDir: getPiAntigravityVaultDir(),
+      modeFile,
+      readHostSlot: () => {
+        throw new Error('Vault setup must not read a native login')
+      },
+      connectEnrollment: async () => ({
+        enrollPropose: async () => ({ requestId: 'synthetic-request' }),
+        enrollPoll: async () => ({
+          status: 'approved',
+          name: PI_ANTIGRAVITY_ENROLLMENT_NAME,
+          token: 'b'.repeat(64),
+          tokenGeneration: 1,
+        }),
+        close: () => {},
+      }),
+    })
+    expect((await setup.connectStep()).state).toBe('approved')
+    const registerProvider = mock()
+    const registerCommand = mock()
+    await cortexKitPiAntigravityAuth({
+      registerProvider,
+      registerCommand,
+    } as never)
+    expect(registerProvider).toHaveBeenCalledTimes(1)
+    const [provider, config] = registerProvider.mock.calls[0] as [
+      string,
+      { apiKey?: string; oauth?: unknown; streamSimple?: unknown },
+    ]
+    expect(provider).toBe('google')
+    expect(config.apiKey).toBe(CUSTODY_PROVIDER_KEY_MARKER)
+    expect(config.oauth).toBeUndefined()
+    expect(config.streamSimple).toBeFunction()
+    expect(registerCommand).toHaveBeenCalledTimes(1)
+    expect(registerCommand.mock.calls[0]?.[0]).toBe('antigravity')
+  } finally {
+    if (previous === undefined) delete process.env.PI_ANTIGRAVITY_AUTH_FILE
+    else process.env.PI_ANTIGRAVITY_AUTH_FILE = previous
     await rm(directory, { recursive: true, force: true })
   }
 })

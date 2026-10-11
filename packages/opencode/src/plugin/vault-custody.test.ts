@@ -1,7 +1,7 @@
 /**
  * OpenCode vault custody: paths, the mode file, the enrollment step over the
  * genuine vault library with an owned fake vault service, the custody
- * switch and its host-slot refusal, and the Vault menu section. Every path
+ * switch with dormant local logins, and the Vault menu section. Every path
  * is under a temporary directory; nothing connects to a real vault.
  */
 
@@ -22,6 +22,7 @@ import { loadCommonAuthClaustrum } from '@cortexkit/antigravity-auth-core'
 import {
   createOpenCodeVaultCustody,
   OPENCODE_VAULT_ENROLLMENT_NAME,
+  OPENCODE_VAULT_HOST,
   type OpenCodeVaultCustodyOptions,
   openCodeVaultPaths,
   readOpenCodeVaultMode,
@@ -167,35 +168,128 @@ describe('createOpenCodeVaultCustody', () => {
     expect((await custody.status()).mode).toBe('local')
   })
 
-  it('refuses custody while OpenCode holds its own Google login, and when the slot cannot be read', async () => {
+  it('refuses disconnect while another enrollment operation holds the ceremony lock, preserving files and mode', async () => {
+    const service = fakeEnrollmentService()
+    let hold = false
+    let release!: () => void
+    let entered!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const polling = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const { custody } = custodyWith(async () => undefined, service, {
+      connectEnrollment: async () => {
+        const client = await service.connect()
+        return {
+          ...client,
+          enrollPoll: async () => {
+            if (hold) {
+              entered()
+              await barrier
+            }
+            return client.enrollPoll()
+          },
+        }
+      },
+    })
+    await custody.requestAccess()
+    const paths = openCodeVaultPaths(accountFile)
+    writeFileSync(
+      paths.modeFile,
+      JSON.stringify({ version: 1, mode: 'custody' }),
+      { mode: 0o600 },
+    )
+    const enrollment = (await loadCommonAuthClaustrum()).hostEnrollmentPaths({
+      stateDir: paths.dir,
+      host: OPENCODE_VAULT_HOST,
+    })
+    const state = readFileSync(enrollment.statePath)
+    const mode = readFileSync(paths.modeFile)
+    hold = true
+    const pending = custody.requestAccess().then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    )
+    try {
+      await polling
+      await expect(custody.useLocal()).rejects.toThrow(
+        'Vault enrollment is busy',
+      )
+      expect(readFileSync(enrollment.statePath)).toEqual(state)
+      expect(readFileSync(paths.modeFile)).toEqual(mode)
+    } finally {
+      release()
+      await pending
+      await custody.dispose()
+    }
+  })
+
+  it('refuses disconnect of another consumer without deleting its token or state', async () => {
     const service = fakeEnrollmentService()
     service.approveNext()
-    const signedIn = custodyWith(
-      async () => ({
-        type: 'oauth',
-        refresh: 'host-refresh',
-        access: 'host-access',
-        expires: 1,
-      }),
-      service,
-    )
-    await signedIn.custody.requestAccess()
-    await expect(signedIn.custody.useVault()).rejects.toThrow(
-      'signed in to Google with its own login',
-    )
-    expect((await signedIn.custody.readMode()).ok).toBe(true)
-    expect(
-      (await readOpenCodeVaultMode(openCodeVaultPaths(accountFile).modeFile))
-        .ok && (await signedIn.custody.status()).mode,
-    ).toBe('local')
+    const { custody } = custodyWith(async () => undefined, service)
+    try {
+      await custody.requestAccess()
+      await custody.useVault()
+      const paths = openCodeVaultPaths(accountFile)
+      const enrollment = (await loadCommonAuthClaustrum()).hostEnrollmentPaths({
+        stateDir: paths.dir,
+        host: OPENCODE_VAULT_HOST,
+      })
+      const foreign = {
+        ...JSON.parse(readFileSync(enrollment.statePath, 'utf8')),
+        proposedName: 'synthetic-foreign-consumer',
+      }
+      writeFileSync(enrollment.statePath, JSON.stringify(foreign))
+      const state = readFileSync(enrollment.statePath)
+      const token = readFileSync(enrollment.tokenPath)
+      const mode = readFileSync(paths.modeFile)
+      await expect(custody.useLocal()).rejects.toThrow('different consumer')
+      expect(readFileSync(enrollment.statePath)).toEqual(state)
+      expect(readFileSync(enrollment.tokenPath)).toEqual(token)
+      expect(readFileSync(paths.modeFile)).toEqual(mode)
+    } finally {
+      await custody.dispose()
+    }
+  })
 
-    const unreadable = custodyWith(async () => {
-      throw new Error('host API failed')
+  it('approved enrollment ignores a retained native login and overrides a stale local preference', async () => {
+    const service = fakeEnrollmentService()
+    service.approveNext()
+    const nativeFile = join(root, 'native-google-auth.json')
+    const nativeBytes = JSON.stringify({
+      type: 'oauth',
+      refresh: 'synthetic-native-refresh',
+      access: 'synthetic-native-access',
+      expires: 1,
+    })
+    writeFileSync(nativeFile, nativeBytes)
+    let slotReads = 0
+    const signedIn = custodyWith(async () => {
+      slotReads += 1
+      return JSON.parse(readFileSync(nativeFile, 'utf8'))
     }, service)
-    await expect(unreadable.custody.useVault()).rejects.toThrow(
-      'could not be read',
+    await signedIn.custody.requestAccess()
+    await signedIn.custody.useVault()
+    writeFileSync(
+      openCodeVaultPaths(accountFile).modeFile,
+      '{"version":1,"mode":"local"}',
     )
-    expect((await unreadable.custody.status()).hostSlot).toBe('unreadable')
+    expect((await signedIn.custody.status()).mode).toBe('custody')
+    expect((await signedIn.custody.status()).hostSlot).toBe('not-used')
+    expect(slotReads).toBe(0)
+    expect(readFileSync(nativeFile, 'utf8')).toBe(nativeBytes)
+
+    const unreadableNativeLogin = custodyWith(async () => {
+      throw new Error('native login must not be read')
+    }, service)
+    await unreadableNativeLogin.custody.useVault()
+    expect((await unreadableNativeLogin.custody.status()).mode).toBe('custody')
+    expect((await unreadableNativeLogin.custody.status()).hostSlot).toBe(
+      'not-used',
+    )
   })
 
   it('opens no vault source unless the mode is custody', async () => {
@@ -212,16 +306,17 @@ describe('createOpenCodeVaultCustody', () => {
     expect(connected).toBe(0)
   })
 
-  it('refuses the custody source while OpenCode holds its own login, before connecting', async () => {
+  it('constructs the approved vault source without resolving the native login', async () => {
     let connected = 0
+    let slotReads = 0
+    const service = fakeEnrollmentService()
+    service.approveNext()
     const { custody } = custodyWith(
-      async () => ({
-        type: 'oauth',
-        refresh: 'host-refresh',
-        access: 'host-access',
-        expires: 1,
-      }),
-      undefined,
+      async () => {
+        slotReads += 1
+        throw new Error('native login must stay dormant')
+      },
+      service,
       {
         connect: async () => {
           connected += 1
@@ -229,13 +324,13 @@ describe('createOpenCodeVaultCustody', () => {
         },
       },
     )
-    const { dir, modeFile } = openCodeVaultPaths(accountFile)
-    mkdirSync(dir, { mode: 0o700 })
-    writeFileSync(modeFile, '{"version":1,"mode":"custody"}')
-    await expect(custody.custodySource()).rejects.toThrow(
-      'signed in to Google with its own login',
-    )
-    expect(connected).toBe(0)
+    await custody.requestAccess()
+    const source = await custody.custodySource()
+    await expect(source.refresh()).rejects.toThrow('not reached')
+    expect(source.routes()).toEqual([])
+    expect(slotReads).toBe(0)
+    expect(connected).toBe(1)
+    await custody.dispose()
   })
 
   it('shows non-secret status and setup actions in the Vault section', async () => {
@@ -255,4 +350,49 @@ describe('createOpenCodeVaultCustody', () => {
       'use-vault',
     ])
   })
+})
+
+it('observes source transitions with the existing consumer while local credentials stay dormant', async () => {
+  const authorities: string[] = []
+  let resolveLocal: () => void = () => {}
+  const firstLocal = new Promise<void>((resolve) => {
+    resolveLocal = resolve
+  })
+  let connects = 0
+  let nativeReads = 0
+  const service = fakeEnrollmentService()
+  const { custody } = custodyWith(
+    async () => {
+      nativeReads += 1
+      throw new Error('observation must not resolve native credentials')
+    },
+    service,
+    {
+      onAuthorityChanged: (authority) => {
+        authorities.push(authority)
+        if (authority === 'local') resolveLocal()
+      },
+      connect: async () => {
+        connects += 1
+        throw new Error('synthetic vault unavailable')
+      },
+    },
+  )
+  try {
+    await custody.startObservation()
+    await firstLocal
+    expect(connects).toBe(0)
+    service.approveNext()
+    await custody.requestAccess()
+    const source = await custody.custodySource()
+    await expect(source.refresh()).rejects.toThrow(
+      'synthetic vault unavailable',
+    )
+    expect(connects).toBe(1)
+    await custody.useLocal()
+    expect(authorities).toEqual(['local', 'vault', 'local'])
+    expect(nativeReads).toBe(0)
+  } finally {
+    await custody.dispose()
+  }
 })

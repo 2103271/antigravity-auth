@@ -221,6 +221,8 @@ The adapter uses the shared v4 `antigravity-accounts.json` pool. `ACCOUNT_INELIG
 
 The `oc-plugin` manifest enables only the server entry (`packages/opencode-v2/src/plugin.ts`). OpenCode 2's cross-platform host resolver also probes `./tui` and `./rpc` subpaths even for server-only packages; the package exports inert placeholders (`packages/opencode-v2/src/tui.ts`, `packages/opencode-v2/src/rpc.ts`) to satisfy resolver discovery while leaving UI rendering to OpenCode 2's native provider UI.
 
+GA keeps its local and vault source bindings stable across enrollment changes, without rotating the RPC generation. Each operation checks the current account source. Local account files and the local request executor are opened only when an authorized local operation needs them. Menu actions refresh the newly selected account view; vault mode leaves local quota polling and token refresh dormant.
+
 ## OpenTUI process and trust boundary
 
 ### Two halves of the contract
@@ -292,6 +294,8 @@ The notification queue is `packages/opencode/src/rpc/notifications.ts:1-59`. `pu
 - `streamSimple` is `streamCortexKitAntigravity` from `packages/pi/src/stream.ts`. It preserves same-model thinking/text/tool signatures, keeps native function-call IDs, emits same-target function responses with the AGY CLI model role, and tracks `last_execution_id` plus CLI-compatible step indexes per Pi session.
 
 The package's `package.json` (`packages/pi/package.json:34-58`) declares `pi.extensions: ['./dist/index.js']` and pulls Pi's three peer dependencies from `@earendil-works/`.
+
+Local and vault modes use the same `google/` model IDs. Before provider registration and on session start, Pi synchronizes its native `auth.json` slot through common-auth's locked Pi-slot helper. Vault mode saves the existing login and installs a non-secret marker; disconnect restores the saved login only if the slot still belongs to this enrollment. A conflicting change is never overwritten. Vault streams require the exact marker and obtain fresh credentials from the vault, with no local fallback. Vault setup and account-source creation remain lazy.
 
 ### Pi's package-name dependency on the host
 

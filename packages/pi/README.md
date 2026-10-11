@@ -26,7 +26,17 @@ callback URL (or authorization code) back into the prompt.
 The extension replaces Pi's built-in `google` catalog with Antigravity models.
 Use Antigravity OAuth for this provider, not a Google AI Studio API key. If upgrading
 from the old provider ID, change model selections to `google/antigravity-…` and
-run `/login google`. Existing credentials are not moved or overwritten automatically.
+run `/login google`. Credentials saved under `google-antigravity` are not migrated
+to `google` automatically.
+
+Use `/antigravity` to request vault access and select a vault account. Local and
+vault modes use the same `google/antigravity-…` model IDs. After the operator
+approves access, the extension backs up Pi's native Google login and temporarily
+replaces its slot with a non-secret marker before the first model request.
+Requests then use only vault credentials; an empty or unreachable vault does not
+fall back to the local login. Disconnecting vault enrollment restores the saved
+login. If another process changed the native slot, the extension keeps the backup
+and refuses to overwrite that change.
 
 ## Models
 

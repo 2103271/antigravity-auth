@@ -198,11 +198,13 @@ export interface AntigravityApplyInput {
 export interface AntigravityQuotaWindowDto {
   readonly window: 'weekly' | '5h'
   readonly remainingPercent: number
+  readonly checkedAt?: number
   readonly resetAt?: number
 }
 
 export interface AntigravityQuotaEntryDto {
   readonly remainingPercent: number
+  readonly checkedAt?: number
   readonly resetAt?: number
   readonly windows?: readonly AntigravityQuotaWindowDto[]
 }
@@ -650,7 +652,7 @@ function checkQuotaWindow(value: unknown, path: Path, issues: Issues): void {
       path,
       issues,
       ['window', 'remainingPercent'],
-      ['resetAt'],
+      ['resetAt', 'checkedAt'],
     )
   ) {
     return
@@ -670,6 +672,9 @@ function checkQuotaWindow(value: unknown, path: Path, issues: Issues): void {
   if (present(value, 'resetAt')) {
     checkTimestamp(value.resetAt, [...path, 'resetAt'], issues)
   }
+  if (present(value, 'checkedAt')) {
+    checkTimestamp(value.checkedAt, [...path, 'checkedAt'], issues)
+  }
 }
 
 function checkQuotaEntry(value: unknown, path: Path, issues: Issues): void {
@@ -679,7 +684,7 @@ function checkQuotaEntry(value: unknown, path: Path, issues: Issues): void {
       path,
       issues,
       ['remainingPercent'],
-      ['resetAt', 'windows'],
+      ['resetAt', 'windows', 'checkedAt'],
     )
   ) {
     return
@@ -695,6 +700,9 @@ function checkQuotaEntry(value: unknown, path: Path, issues: Issues): void {
   }
   if (present(value, 'resetAt')) {
     checkTimestamp(value.resetAt, [...path, 'resetAt'], issues)
+  }
+  if (present(value, 'checkedAt')) {
+    checkTimestamp(value.checkedAt, [...path, 'checkedAt'], issues)
   }
   if (present(value, 'windows')) {
     checkArray(

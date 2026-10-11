@@ -7,12 +7,22 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   getAntigravityOpencodeModelIds,
+  loadCommonAuthClaustrum,
   OPENCODE_MODEL_DEFINITIONS,
+  VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
 import * as packageRoot from '../index'
 
@@ -20,14 +30,18 @@ import { ANTIGRAVITY_PROVIDER_ID } from './constants.ts'
 import { ANTIGRAVITY_MENU_COMMAND } from './plugin/commands.ts'
 import { GEMINI_DUMP_COMMAND_NAME } from './plugin/gemini-dump.ts'
 import { createAntigravityPlugin } from './plugin/index'
+import { getStoragePath } from './plugin/storage'
 import type { PluginClient, PluginInput } from './plugin/types.ts'
+import {
+  createOpenCodeVaultCustody,
+  OPENCODE_VAULT_ENROLLMENT_NAME,
+  openCodeVaultPaths,
+} from './plugin/vault-custody'
+import { drainNotifications } from './rpc/notifications'
 
 /**
- * Minimal client stub: createAntigravityPlugin only touches the client during
- * initialization via initLogger, and during session lifecycle events we never
- * trigger here. Returning `undefined` from these methods keeps the loader path
- * inert — the test only inspects the plugin's exported hooks, not its runtime
- * behavior under real OpenCode events.
+ * A host-client stand-in for entry wiring tests. These methods record calls
+ * without dispatching real sessions, authentication writes or terminal output.
  */
 function createMinimalClient(): PluginClient {
   return {
@@ -217,4 +231,124 @@ describe('package root exports', () => {
     expect('authorizeAntigravity' in packageRoot).toBe(false)
     expect('exchangeAntigravity' in packageRoot).toBe(false)
   })
+})
+
+it('the production V1 entry opens the vault menu without opening or changing dormant local accounts', async () => {
+  const owned = realpathSync(
+    mkdtempSync(
+      join(
+        process.platform === 'win32' ? tmpdir() : '/tmp',
+        'agy-v1-vault-entry-',
+      ),
+    ),
+  )
+  const overrides = {
+    OPENCODE_CONFIG_DIR: join(owned, 'config'),
+    ANTIGRAVITY_AUTH_RPC_DIR: join(owned, 'rpc'),
+    ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE: join(owned, 'sidebar.json'),
+  }
+  const prior = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  )
+  Object.assign(process.env, overrides)
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(
+    Object.assign(async () => new Response('not-found', { status: 404 }), {
+      preconnect: globalThis.fetch.preconnect,
+    }),
+  )
+  const accountFile = getStoragePath()
+  mkdirSync(join(owned, 'config'), { recursive: true })
+  const localBytes = JSON.stringify({
+    version: 4,
+    accounts: [
+      {
+        refreshToken: 'synthetic-dormant-refresh',
+        projectId: 'synthetic-local-project',
+        addedAt: 1,
+        lastUsed: 1,
+      },
+    ],
+    activeIndex: 0,
+    activeIndexByFamily: { claude: 0, gemini: 0 },
+  })
+  writeFileSync(accountFile, localBytes, { mode: 0o600 })
+  const seeding = createOpenCodeVaultCustody({
+    accountFile,
+    reporterSource: 'direct',
+    readHostSlot: async () => {
+      throw new Error('enrollment must not read the native login')
+    },
+    connectEnrollment: async () => ({
+      enrollPropose: async () => ({ requestId: 'synthetic-request' }),
+      enrollPoll: async () => ({
+        status: 'approved' as const,
+        name: OPENCODE_VAULT_ENROLLMENT_NAME,
+        token: 'ab'.repeat(32),
+        tokenGeneration: 1,
+      }),
+      close() {},
+    }),
+  })
+  let dispose: (() => Promise<void> | void) | undefined
+  try {
+    expect((await seeding.requestAccess()).state).toBe('approved')
+    const claustrum = await loadCommonAuthClaustrum()
+    const paths = claustrum.hostEnrollmentPaths({
+      stateDir: openCodeVaultPaths(accountFile).dir,
+      host: 'opencode',
+    })
+    unlinkSync(paths.tokenPath)
+    const client = createMinimalClient()
+    const plugin = await packageRoot.GoogleOAuthPlugin(
+      createPluginInput(client, owned),
+    )
+    dispose = plugin.dispose
+    const localLogin = plugin.auth?.methods.find(
+      (method) => method.type === 'oauth',
+    )
+    if (localLogin?.type !== 'oauth')
+      throw new Error('the native OAuth method is absent')
+    await expect(localLogin.authorize()).rejects.toThrow(VAULT_ACCOUNT_REMEDY)
+    await expect(
+      plugin['command.execute.before']?.(
+        {
+          command: ANTIGRAVITY_MENU_COMMAND,
+          arguments: '',
+          sessionID: 'vault-entry-session',
+        },
+        { parts: [] },
+      ),
+    ).rejects.toThrow()
+    const notifications = await drainNotifications(0, 'vault-entry-session')
+    const serialized = JSON.stringify(notifications)
+    expect(serialized).toContain('Vault')
+    expect(serialized).toContain('Accounts')
+    expect(serialized).not.toContain('synthetic-dormant-refresh')
+    expect(serialized).not.toContain('synthetic-local-project')
+    expect(serialized).not.toContain('migrate --offline')
+    expect(readFileSync(accountFile, 'utf8')).toBe(localBytes)
+    expect(client.auth.set).not.toHaveBeenCalled()
+    expect(
+      JSON.stringify(
+        await claustrum.readClaustrumEnrollmentStatus(
+          paths,
+          OPENCODE_VAULT_ENROLLMENT_NAME,
+        ),
+      ),
+    ).toContain('missing_token')
+    await dispose?.()
+    dispose = undefined
+    expect(
+      readFileSync(overrides.ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE, 'utf8'),
+    ).toContain(VAULT_ACCOUNT_REMEDY)
+  } finally {
+    await dispose?.()
+    await seeding.dispose()
+    fetchSpy.mockRestore()
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(owned, { recursive: true, force: true })
+  }
 })

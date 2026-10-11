@@ -7,7 +7,7 @@ import { ClaustrumClient, } from '@cortexkit/claustrum-client';
 export { ClaustrumCredentialError, } from '@cortexkit/claustrum-client';
 export { ClaustrumConsumer, } from './consumer.js';
 export { ClaustrumScopedCustody, decideScopedRetryAfter401, isScopedCredentialRotation, SERVING_MARGIN_MS, } from './custody.js';
-export { ClaustrumEnrollmentManager, classifyEnrollmentError, connectClaustrumEnrollmentClient, enrollmentName, getClaustrumEnrollmentPaths, hostEnrollmentPaths, RETRYABLE_ENROLLMENT_CODES, readClaustrumEnrollmentStatus, readClaustrumEnrollmentToken, resetClaustrumEnrollmentState, TERMINAL_ENROLLMENT_CODES, } from './enrollment.js';
+export { ClaustrumEnrollmentManager, classifyEnrollmentError, connectClaustrumEnrollmentClient, disconnectClaustrumEnrollment, enrollmentAuthority, enrollmentName, getClaustrumEnrollmentPaths, hostEnrollmentPaths, RETRYABLE_ENROLLMENT_CODES, readClaustrumEnrollmentStatus, readClaustrumEnrollmentToken, resetClaustrumEnrollmentState, TERMINAL_ENROLLMENT_CODES, } from './enrollment.js';
 export { ClaustrumConsumerError, } from './errors.js';
 export { assertHostSlotMatchesMode, assertNotCustodyPlaceholder, CUSTODY_PLACEHOLDER_PREFIX, classifyHostSlot, custodyPlaceholder, custodyPlaceholderKey, isCustodyPlaceholder, isCustodyPlaceholderValue, } from './host-slot.js';
 export { acceptAccount, declineAccount, isDeclined, } from './interlock.js';

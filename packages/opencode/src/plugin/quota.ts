@@ -43,6 +43,7 @@ import {
   type RowRef,
   rowRefKey,
   sameRowRef,
+  VAULT_ACCOUNT_REMEDY,
   type VaultRouteRef,
   type VaultStateAttribution,
 } from '@cortexkit/antigravity-auth-core'
@@ -147,13 +148,30 @@ export function createOpenCodeQuotaManager(
      * quota refresh + project discovery stay on the loopback server.
      */
     fetchVia?: QuotaFetch
+    mayRun?: () => Promise<boolean>
+    fetchStoreAccountQuota?: FetchAccountQuota
+    /** Select the sidebar's account source before reading rows, so vault mode cannot expose the local pool. */
+    publishSidebar?: () => Promise<void>
   } = {},
 ): QuotaManager {
-  const fetchAccountQuota = makeFetchAccountQuota(
+  const fetchPoolFileQuota = makeFetchAccountQuota(
     client,
     providerId,
     options.fetchVia,
   )
+  const fetchAccountQuota: FetchAccountQuota = async (account, request) => {
+    const target = account as AccountQuotaTarget
+    const ref = target.rowRef
+    if (options.mayRun && !(await options.mayRun()))
+      throw new Error(VAULT_ACCOUNT_REMEDY)
+    if (ref !== undefined) {
+      if (!options.fetchStoreAccountQuota)
+        throw new Error('Store quota authorization is unavailable')
+      const captured: AccountQuotaTarget = { ...target, rowRef: ref }
+      return options.fetchStoreAccountQuota(captured, request)
+    }
+    return fetchPoolFileQuota(account, request)
+  }
   const manager = createQuotaManager({
     fetchAccountQuota,
     keyOf: options.keyOf ?? defaultKeyOf,
@@ -165,14 +183,15 @@ export function createOpenCodeQuotaManager(
   const getActiveIndexByFamily = options.getActiveIndexByFamily
   return withSidebarPushAfterRefresh(
     manager,
-    getAccountsForSidebar
-      ? (account) =>
-          pushSidebarQuotaSnapshot(
-            getAccountsForSidebar,
-            manager.getBackoffUntil(account),
-            getActiveIndexByFamily,
-          )
-      : undefined,
+    options.publishSidebar ??
+      (getAccountsForSidebar
+        ? (account) =>
+            pushSidebarQuotaSnapshot(
+              getAccountsForSidebar,
+              manager.getBackoffUntil(account),
+              getActiveIndexByFamily,
+            )
+        : undefined),
   )
 }
 
@@ -399,6 +418,7 @@ export interface SidebarQuotaAccount {
   enabled?: boolean
   coolingDownUntil?: number
   cachedQuota?: AccountMetadataV3['cachedQuota']
+  cachedQuotaUpdatedAt?: number
   cachedQuotaAccountId?: string
   currentQuotaAccountId?: string
   /** Captured plan tier to surface in the sidebar state file. */
@@ -484,6 +504,7 @@ export async function pushSidebarQuotaSnapshot(
             : false,
           coolingDownUntil: entry.coolingDownUntil,
           cachedQuota: entry.cachedQuota,
+          cachedQuotaUpdatedAt: entry.cachedQuotaUpdatedAt,
           cachedQuotaAccountId: entry.cachedQuotaAccountId,
           currentQuotaAccountId: entry.currentQuotaAccountId,
           ...(healthScore ? { healthScore: healthScore(entry.index) } : {}),
@@ -1353,24 +1374,51 @@ async function persistRotatedRefresh(
 export function makeTierLoader(
   client: PluginClient | undefined,
   providerId: string,
+  options: {
+    mayRun?: () => Promise<boolean>
+    authorizeStore?: (
+      account: AccountQuotaTarget,
+    ) => Promise<LocalQuotaCheckAuthorization>
+  } = {},
 ): (
   account: AccountMetadataV3,
 ) => Promise<{ id: string; paidId?: string; capturedAt: number } | null> {
   return async (account) => {
     try {
-      let auth = buildAuthFromAccount(account)
-      if (accessTokenExpired(auth)) {
-        const refreshed = await refreshAccessToken(
-          auth,
-          client as PluginClient,
-          providerId,
+      if (options.mayRun && !(await options.mayRun())) return null
+      let accessToken: string | undefined
+      const target = account as AccountQuotaTarget
+      if (target.rowRef !== undefined) {
+        if (!options.authorizeStore) return null
+        const authorization = await options.authorizeStore(target)
+        if (
+          authorization.status !== 'authorized' ||
+          authorization.domain !== 'local'
         )
-        if (!refreshed) return null
-        auth = refreshed
-      }
+          return null
+        if (options.mayRun && !(await options.mayRun())) return null
+        if (
+          (await authorization.confirmSend(new AbortController().signal))
+            .status !== 'current'
+        )
+          return null
+        accessToken = authorization.accessToken
+      } else {
+        let auth = buildAuthFromAccount(account)
+        if (accessTokenExpired(auth)) {
+          const refreshed = await refreshAccessToken(
+            auth,
+            client as PluginClient,
+            providerId,
+          )
+          if (!refreshed) return null
+          auth = refreshed
+        }
 
-      const accessToken = auth.access
+        accessToken = auth.access
+      }
       if (!accessToken) return null
+      if (options.mayRun && !(await options.mayRun())) return null
 
       const payload = await loadManagedProject(accessToken)
       if (!payload?.currentTier?.id) return null
@@ -1482,6 +1530,10 @@ function canonicalQuotaGroups(
  * backoff.
  */
 export interface StoreQuotaService {
+  readonly authorizeLocalCheck: (
+    account: AccountQuotaTarget,
+  ) => Promise<LocalQuotaCheckAuthorization>
+  readonly fetchAccountQuota: FetchAccountQuota
   /** The pool's quota manager (cache, in-flight dedupe and backoff). */
   readonly quotaManager: QuotaManager
   /**
@@ -1509,6 +1561,7 @@ export interface StoreQuotaService {
 }
 
 export interface StoreQuotaServiceOptions {
+  readonly mayRun?: () => Promise<boolean>
   /** The pool's account manager, whose accounts come from the repository. */
   manager: CoreAccountManager
   /** That manager's repository; read back to confirm recorded readings. */
@@ -1582,6 +1635,8 @@ export function createStoreQuotaService(
     if (ref === undefined) {
       return { status: 'refused', reason: 'the account has no store ref' }
     }
+    if (options.mayRun && !(await options.mayRun()))
+      return { status: 'refused', reason: VAULT_ACCOUNT_REMEDY }
     const held = heldAccount(manager, ref)
     if (held === undefined) {
       return { status: 'refused', reason: 'the account changed or was removed' }
@@ -1602,6 +1657,8 @@ export function createStoreQuotaService(
     if (grantRef === undefined || !accessToken) {
       return { status: 'refused', reason: 'no access token' }
     }
+    if (options.mayRun && !(await options.mayRun()))
+      return { status: 'refused', reason: VAULT_ACCOUNT_REMEDY }
     const project = await credentials.ensureProject(auth)
     if (project.auth.refresh !== auth.refresh) {
       // The resolved project belongs to this credential: the manager records
@@ -1620,6 +1677,8 @@ export function createStoreQuotaService(
       ...(managedProjectId !== undefined ? { managedProjectId } : {}),
       async confirmSend() {
         try {
+          if (options.mayRun && !(await options.mayRun()))
+            return { status: 'stale', reason: VAULT_ACCOUNT_REMEDY }
           if (held.ref === undefined || !sameRowRef(held.ref, grantRef)) {
             return { status: 'stale', reason: 'the credential changed' }
           }
@@ -1639,13 +1698,14 @@ export function createStoreQuotaService(
     }
   }
 
+  const fetchAccountQuota = createAuthorizedFetchAccountQuota({
+    authorize: (account) => authorize(account as AccountQuotaTarget),
+    logger,
+    transport: options.transport,
+  })
   const quotaManager = createLocationQuotaManager({
     logger,
-    fetchAccountQuota: createAuthorizedFetchAccountQuota({
-      authorize: (account) => authorize(account as AccountQuotaTarget),
-      logger,
-      transport: options.transport,
-    }),
+    fetchAccountQuota,
     // Backoff and cache are per credential: a re-authenticated row starts
     // fresh instead of inheriting its predecessor's state.
     keyOf: (account) => {
@@ -1712,6 +1772,8 @@ export function createStoreQuotaService(
 
   return {
     quotaManager,
+    fetchAccountQuota,
+    authorizeLocalCheck: authorize,
     refreshAccount,
     async checkStoreQuota(refs) {
       // Targets are taken before any await, so each names the credential

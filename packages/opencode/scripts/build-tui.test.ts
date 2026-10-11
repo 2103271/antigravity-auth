@@ -418,7 +418,7 @@ test('build.map_admission_valid_generated', async () => {
   const runtime = await hashes(root, 'src/tui-compiled')
   const generated = await readFile(map)
   expect(JSON.parse(generated.toString()).compiler).toBe(
-    '@cortexkit/common-auth/tui-build@0.12.0',
+    '@cortexkit/common-auth/tui-build@0.14.1',
   )
   for (const compiler of [
     '@cortexkit/common-auth/tui-build@0.9.4',
@@ -497,14 +497,18 @@ test('build.selector_inert', async () => {
 test('graph.ga_roots', async () => {
   const source = await auditGraph(join(product, GA_TUI_ROOT.entry))
   expect(source.files.map((path) => relative(product, path)).sort()).toEqual([
+    ...['codec', 'format', 'index', 'map', 'merge', 'projection'].map(
+      (name) => `src/common-auth-embedded/quota/${name}.js`,
+    ),
     'src/ga/tui/host-ga.tsx',
+    'src/quota-presentation.ts',
     'src/sidebar-projection.ts',
     'src/tui/command-dialogs.tsx',
     'src/tui/host-api.ts',
   ])
   checkGaGraph(source, 'source')
   const map = JSON.parse(await readFile(join(product, GA_TUI_ROOT.map), 'utf8'))
-  expect(map.compiler).toBe('@cortexkit/common-auth/tui-build@0.12.0')
+  expect(map.compiler).toBe('@cortexkit/common-auth/tui-build@0.14.1')
   for (const [variant, tree, entry, kind] of [
     [map.raw, GA_TUI_ROOT.raw, GA_TUI_ROOT.rawEntry, 'raw'],
     [map.runtime, GA_TUI_ROOT.runtime, GA_TUI_ROOT.runtimeEntry, 'runtime'],

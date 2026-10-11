@@ -87,6 +87,10 @@ The harness-agnostic core. Every export under `packages/core/src/index.ts` is gr
 - **`packages/core/src/atomic-write.ts`** — temp-file + `rename` writer (mode `0o600`, no copy fallback); raw `node:fs` only.
 - **`packages/core/src/version.ts`** — exported `VERSION` constant; the build pipeline uses it for cache busting.
 
+- `packages/core/src/vault-enrollment-authority.ts` — selects local or vault accounts from fresh enrollment state and blocks local work while vault access is active or unreadable.
+- `packages/core/src/vault-account-source.ts` — vault account discovery, fresh per-send credentials, and credential-free selection state. It never reads or refreshes the host's local Google login.
+- `packages/core/src/quota-presentation.ts` — adapts Antigravity readings to common-auth's quota formatter without assigning an age to undated readings.
+
 ### Transforms (`packages/core/src/transform/`)
 
 - `packages/core/src/transform/index.ts` — barrel re-export of all transforms and types.
@@ -215,6 +219,8 @@ The `src/tui-compiled/` directory lives under `src/` but is **gitignored** — s
 - `packages/opencode/src/plugin/version.ts` — runs once at plugin boot to publish the installed plugin version (used by the auto-update checker).
 - `packages/opencode/src/plugin/host-api-compatibility.test.ts` — pins the opencode host SDK to a stable property subset (so a host bump that moves a name does not break us silently).
 
+- `packages/opencode/src/plugin/ga-location-services.ts` — location-owned local and vault bindings for OpenCode 2. Local files open lazily; mode changes preserve runtime bindings and RPC generations.
+
 ### Host lifecycle hooks
 
 `packages/opencode/src/hooks/auto-update-checker/` — a self-contained module that runs in the background of the host:
@@ -287,6 +293,9 @@ The TUI is a thin Solid sidebar that polls a redacted snapshot file and a loopba
 - **`packages/pi/src/index.ts`** — package entry. Uses core's shared `ANTIGRAVITY_PROVIDER_ID` (`google`) and replaces Pi's built-in Google catalog with `pi.registerProvider`. OAuth login authenticates the Google account, and token refresh renews its access token; both use `core/antigravity/oauth.ts`.
 - `packages/pi/src/stream.ts` — `streamCortexKitAntigravity`: streams through `core/agy-transport.ts`, preserves signed thinking/tool events, and maintains session-scoped native AGY execution metadata.
 - `packages/pi/src/convert.ts` — Pi Context-to-Gemini conversion with native AGY tool-call IDs, signature replay, cross-model sanitization, and same-target function-response roles.
+- `packages/pi/src/vault-source.ts` — vault discovery and per-request credentials with fresh account-source checks.
+- `packages/pi/src/vault-setup.ts` — enrollment, locked disconnect, vault account actions, and setup status.
+- `packages/pi/src/commands.ts` — the shared `/antigravity` menu, omitting local credential-writing actions in vault mode.
 - `packages/pi/src/credential-cache.ts` — stashes the packed `refreshToken|projectId|managedProjectId` triple so the stream can rejoin project context after the access token is stripped.
 - `packages/pi/src/paths.ts` — resolves the `PI_AGENT_DIR` and `PI_ANTIGRAVITY_AUTH_FILE` paths on every platform (`%APPDATA%` on Windows, `~/.pi/agent/` elsewhere).
 - `packages/pi/src/index.test.ts`, `convert.test.ts`, `credential-cache.test.ts`, `stream.test.ts` — co-located tests.

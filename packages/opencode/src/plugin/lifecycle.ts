@@ -38,7 +38,7 @@ export interface PluginLifecycle extends Disposable {
   replaceAccountRuntime(
     manager: AccountManager,
     refreshQueue: ProactiveRefreshQueue | null,
-  ): Promise<void>
+  ): Promise<boolean>
   register(disposable: Disposable, phase?: LifecyclePhase): void
 }
 
@@ -86,10 +86,11 @@ export function createPluginLifecycle(
       if (disposal) {
         await queue?.dispose()
         await manager.dispose()
-        return
+        return false
       }
       accountManager = manager
       refreshQueue = queue
+      return true
     },
     register,
     dispose() {

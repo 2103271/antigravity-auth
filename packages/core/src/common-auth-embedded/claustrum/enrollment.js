@@ -377,6 +377,40 @@ export async function readClaustrumEnrollmentStatus(paths, proposedName) {
     }
     return statusFromState(state);
 }
+/** Resolve the host's account mode from its enrollment files without writing. */
+export async function enrollmentAuthority(paths, proposedName) {
+    let status;
+    try {
+        status = await readClaustrumEnrollmentStatus(paths, proposedName);
+    }
+    catch (error) {
+        if (!(error instanceof ClaustrumConsumerError) ||
+            (error.kind !== 'invalid-state' && error.kind !== 'invalid-token')) {
+            return 'unreadable';
+        }
+        // An approved ceremony remains vault mode even when its token is corrupt.
+        // Re-read the state so a malformed or unreadable state cannot authorize it.
+        try {
+            const stateValue = await readBoundedJson(paths.statePath);
+            if (stateValue === undefined)
+                return 'unreadable';
+            const state = decodeEnrollmentState(stateValue);
+            return state.phase === 'approved' && state.proposedName === proposedName
+                ? 'vault'
+                : 'unreadable';
+        }
+        catch {
+            return 'unreadable';
+        }
+    }
+    if ('proposedName' in status && status.proposedName !== proposedName)
+        return 'unreadable';
+    if (status.state === 'approved' ||
+        (status.state === 'blocked' && status.code === 'missing_token')) {
+        return 'vault';
+    }
+    return 'local';
+}
 /**
  * Read fresh bearer material for one scoped operation; never publish it.
  * Re-reading per operation is what lets an operator reissue a token on disk.
@@ -644,6 +678,80 @@ export async function resetClaustrumEnrollmentState(paths, proposedName) {
         await lock.assertOwned();
         await unlink(paths.statePath);
         return 'reset';
+    }
+    finally {
+        await lock.release();
+    }
+}
+/** Remove one file, reporting whether it existed; a missing file is not an error. */
+async function removeIfPresent(path) {
+    try {
+        await unlink(path);
+        return true;
+    }
+    catch (error) {
+        if (error.code === 'ENOENT')
+            return false;
+        throw error;
+    }
+}
+/**
+ * Disconnect this host from the vault on disk: remove its enrollment token,
+ * then its ceremony state, so `enrollmentAuthority` reports `local` again.
+ * This is the disconnect every plugin uses. Removing only the token is not
+ * enough: an approved state without a token is still vault mode and refuses,
+ * by design. It never contacts the credential daemon, so the enrollment stays
+ * approved in the vault until the operator revokes it there; a later Connect
+ * starts a new ceremony. A pending request is abandoned the same way.
+ *
+ * Takes the ceremony lock `reconcile()` and `resetClaustrumEnrollmentState`
+ * take, and returns `busy` without deleting anything while another process
+ * holds it. State naming another consumer refuses with `wrong-consumer` and
+ * both files stay. The token goes first: a crash between the two deletions
+ * leaves an approved state without a token, which is still vault mode (it
+ * refuses rather than falls back to local accounts), and calling this again
+ * finishes the job. Returns `idle` when neither file exists. Nothing else in
+ * the directory is touched. The token is removed without being parsed, so a
+ * corrupt token does not stand in the way. A malformed state file (bad JSON
+ * or wrong shape) is removed too, since it is what makes `enrollmentAuthority`
+ * report `unreadable`; a state file that fails the safety checks (symlink,
+ * wrong owner, not owner-only) refuses with `unsafe-file` and both files stay.
+ */
+export async function disconnectClaustrumEnrollment(paths, proposedName) {
+    await ensurePrivateDirectory(dirname(paths.statePath));
+    const lock = await acquireRefreshFileLock({
+        // The same lock as the ceremony, so a token written by a concurrent
+        // reconcile() can never land after this removes the files.
+        name: 'ceremony',
+        path: paths.statePath,
+        ttlMs: ENROLLMENT_LOCK_TTL_MS,
+        renew: true,
+    });
+    if (!lock)
+        return 'busy';
+    try {
+        let state;
+        try {
+            const value = await readBoundedJson(paths.statePath);
+            state = value === undefined ? undefined : decodeEnrollmentState(value);
+        }
+        catch (error) {
+            // A malformed state at this host's own path is this host's: the path is
+            // per host, and disconnect is the remedy for the `unreadable` authority
+            // it causes, so it is removed like any other state. An unsafe file
+            // (symlink, wrong owner, group or other bits) is not provably ours and
+            // still refuses; those checks run before the file is parsed.
+            if (!(error instanceof ClaustrumConsumerError) ||
+                error.kind !== 'invalid-state')
+                throw error;
+        }
+        if (state && state.proposedName !== proposedName)
+            throw wrongConsumer();
+        await lock.assertOwned();
+        const removedToken = await removeIfPresent(paths.tokenPath);
+        await lock.assertOwned();
+        const removedState = await removeIfPresent(paths.statePath);
+        return removedToken || removedState ? 'disconnected' : 'idle';
     }
     finally {
         await lock.release();

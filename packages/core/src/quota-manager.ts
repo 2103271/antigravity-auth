@@ -254,7 +254,11 @@ export function createQuotaManager(options: QuotaManagerOptions): QuotaManager {
         if (controller.signal.aborted) {
           throw new Error('quota manager disposed mid-fetch')
         }
-        const attributed: AccountQuotaResult = { ...result, index }
+        const attributed: AccountQuotaResult = {
+          ...result,
+          index,
+          ...(result.status === 'ok' ? { checkedAt: now() } : {}),
+        }
         cacheResult(key, attributed)
 
         // Adapter contract: `fetchAccountQuota` resolves with an

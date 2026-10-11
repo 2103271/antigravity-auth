@@ -45,6 +45,7 @@ import type {
 } from '@opencode-ai/plugin/tui'
 import { createSlot } from '@opentui/solid'
 import { createSignal, For, type JSX, onCleanup, onMount, Show } from 'solid-js'
+import { formatQuotaReading, quotaReadingParts } from './quota-presentation'
 import { getRpcDir } from './rpc/rpc-dir'
 import {
   readSidebarState,
@@ -236,15 +237,15 @@ interface BarSegment {
 }
 
 function quotaBarSegments(
-  usedPct: number,
+  remainingPct: number,
   appearance: AppearancePrefs,
 ): BarSegment[] {
   const width = appearance.barWidth
   const usedCells = Math.max(
     0,
-    Math.min(Math.round((usedPct / 100) * width), width),
+    Math.min(Math.round((remainingPct / 100) * width), width),
   )
-  const tone = quotaTone(usedPct, appearance)
+  const tone = quotaTone(100 - remainingPct, appearance)
   return [
     { text: appearance.barFilledChar.repeat(usedCells), tone },
     { text: appearance.barEmptyChar.repeat(width - usedCells), tone },
@@ -485,13 +486,8 @@ function CollapsedRow(props: {
   )
 }
 
-// Fleet QuotaRow, adapted to Antigravity's `remainingPercent + resetAt`
-// shape. The left group stacks label + bar + pct in fixed columns so
-// bars line up across rows; the right group carries the reset countdown
-// when the plugin has cached a reset time. Tone is read off the
-// remaining percentage via the antigravity threshold rules — the fleet's
-// `usageTone` would invert the polarity (healthy = high remaining vs
-// healthy = low used), so we keep the antigravity-local `quotaTone`.
+// The bar fills with remaining quota. The shared formatter supplies the
+// figure, reset and reading age; the right column aligns reset and age text.
 function QuotaRow(props: {
   theme: () => Theme
   appearance: AppearancePrefs
@@ -499,17 +495,16 @@ function QuotaRow(props: {
   entry: SidebarQuotaEntry | undefined
   now: () => number
 }): JSX.Element {
-  const used = () =>
-    props.entry ? 100 - clamp(props.entry.remainingPercent, 0, 100) : null
-  const reset = () =>
-    props.entry ? formatResetIn(props.entry.resetAt, props.now) : ''
+  const parts = () => quotaReadingParts(props.label, props.entry, props.now())
+  const remaining = () => parts().remaining
+  const reset = () => parts().detail
   return (
     <Show
-      when={used() != null}
+      when={remaining() != null}
       fallback={
         <box width='100%' flexDirection='row' justifyContent='space-between'>
           <text fg={props.theme().textMuted}>{props.label.padEnd(5)}</text>
-          <text fg={props.theme().textMuted}>{'\u2014'}</text>
+          <text fg={props.theme().textMuted}>{parts().figure}</text>
         </box>
       }
     >
@@ -523,7 +518,7 @@ function QuotaRow(props: {
             flexShrink={0}
             flexDirection='row'
           >
-            <For each={quotaBarSegments(used() ?? 0, props.appearance)}>
+            <For each={quotaBarSegments(remaining() ?? 0, props.appearance)}>
               {(segment) => (
                 <text fg={toneColor(props.theme(), segment.tone)}>
                   {segment.text}
@@ -534,10 +529,10 @@ function QuotaRow(props: {
           <text
             fg={toneColor(
               props.theme(),
-              quotaTone(used() ?? 0, props.appearance),
+              quotaTone(100 - (remaining() ?? 0), props.appearance),
             )}
           >
-            {` ${String(Math.round(used() ?? 0)).padStart(3)}%`}
+            {` ${parts().figure}`}
           </text>
         </box>
         <Show when={reset()}>
@@ -627,6 +622,7 @@ function AccountBlock(props: {
                   entry={{
                     remainingPercent: w.remainingPercent,
                     resetAt: w.resetAt,
+                    checkedAt: w.checkedAt,
                   }}
                   now={props.now}
                 />
@@ -791,26 +787,22 @@ export function SidebarPanel(props: SidebarPanelProps): JSX.Element {
           const account = () =>
             visibleAccounts().find((entry) => entry.current) ??
             visibleAccounts()[0]
-          const used = () => {
+          const remaining = () => {
             const q = account()?.quota
-            // Derive tone from the WORST (most-constrained) pool so a
-            // critical non-gemini pool doesn't hide behind a healthy
-            // gemini tone. Worst = highest used-percent across available pools.
-            const geminiUsed =
-              q?.gemini != null
-                ? 100 - clamp(q.gemini.remainingPercent, 0, 100)
-                : null
-            const nonGeminiUsed =
-              q?.['non-gemini'] != null
-                ? 100 - clamp(q['non-gemini'].remainingPercent, 0, 100)
-                : null
-            if (geminiUsed === null && nonGeminiUsed === null) return null
-            return Math.max(geminiUsed ?? 0, nonGeminiUsed ?? 0)
+            // The lowest remaining percentage among dated readings determines the warning tone.
+            const gemini = quotaReadingParts('Gm', q?.gemini, now()).remaining
+            const nonGemini = quotaReadingParts(
+              'NG',
+              q?.['non-gemini'],
+              now(),
+            ).remaining
+            if (gemini === null && nonGemini === null) return null
+            return Math.min(gemini ?? 100, nonGemini ?? 100)
           }
           const poolText = (key: 'gemini' | 'non-gemini') => {
             const entry = account()?.quota[key]
-            if (!entry) return `${QUOTA_LABELS[key]}: —`
-            const pct = Math.round(100 - clamp(entry.remainingPercent, 0, 100))
+            if (!entry)
+              return `${QUOTA_LABELS[key]}: ${formatQuotaReading(QUOTA_LABELS[key], undefined, now())}`
             // Show binding window when available, else just pool label.
             const bindingWindow = entry.windows?.reduce<
               (typeof entry.windows)[0] | null
@@ -824,7 +816,12 @@ export function SidebarPanel(props: SidebarPanelProps): JSX.Element {
             const gutter = bindingWindow
               ? ` ${WINDOW_GUTTER[bindingWindow.window] ?? bindingWindow.window}`
               : ''
-            return `${QUOTA_LABELS[key]}${gutter}: ${pct}%`
+            const text = formatQuotaReading(
+              `${QUOTA_LABELS[key]}${gutter}`,
+              bindingWindow ?? entry,
+              now(),
+            )
+            return bindingWindow ? `${QUOTA_LABELS[key]} ${text}` : text
           }
           const unavailable = () => {
             const selected = account()
@@ -843,9 +840,12 @@ export function SidebarPanel(props: SidebarPanelProps): JSX.Element {
                     <text
                       fg={toneColor(
                         theme(),
-                        used() == null
+                        remaining() == null
                           ? 'muted'
-                          : quotaTone(used() ?? 0, prefs().appearance),
+                          : quotaTone(
+                              100 - (remaining() ?? 100),
+                              prefs().appearance,
+                            ),
                       )}
                     >
                       <b>
@@ -860,7 +860,12 @@ export function SidebarPanel(props: SidebarPanelProps): JSX.Element {
                         theme(),
                         unavailable()
                           ? 'err'
-                          : quotaTone(used() ?? 0, prefs().appearance),
+                          : remaining() == null
+                            ? 'muted'
+                            : quotaTone(
+                                100 - (remaining() ?? 100),
+                                prefs().appearance,
+                              ),
                       )}
                     >
                       {unavailable() ? ' ⊘' : ' ●'}

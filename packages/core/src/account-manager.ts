@@ -461,6 +461,7 @@ export class AccountManager {
         ? this.repositorySink()
         : {
             requestSave: () => this.requestSaveToDisk(),
+            usage: () => this.requestSaveToDisk(),
             stale: (account, label) => this.ignoreStale(account, label),
           },
       // A repository-backed manager gets its own new trackers. A pool-file

@@ -102,6 +102,8 @@ export interface EnrollmentAncestorOptions {
  */
 export declare function refuseWritableAncestor(parent: string, options?: EnrollmentAncestorOptions): Promise<void>;
 export declare function readClaustrumEnrollmentStatus(paths: ClaustrumEnrollmentPaths, proposedName: string): Promise<ClaustrumEnrollmentStatus>;
+/** Resolve the host's account mode from its enrollment files without writing. */
+export declare function enrollmentAuthority(paths: ClaustrumEnrollmentPaths, proposedName: string): Promise<'vault' | 'local' | 'unreadable'>;
 /**
  * Read fresh bearer material for one scoped operation; never publish it.
  * Re-reading per operation is what lets an operator reissue a token on disk.
@@ -130,3 +132,27 @@ export declare class ClaustrumEnrollmentManager {
 export type ClaustrumEnrollmentResetResult = 'reset' | 'idle' | 'refused-pending' | 'refused-approved' | 'busy';
 /** Reset local terminal metadata without connecting to the credential daemon. */
 export declare function resetClaustrumEnrollmentState(paths: ClaustrumEnrollmentPaths, proposedName: string): Promise<ClaustrumEnrollmentResetResult>;
+export type ClaustrumEnrollmentDisconnectResult = 'disconnected' | 'idle' | 'busy';
+/**
+ * Disconnect this host from the vault on disk: remove its enrollment token,
+ * then its ceremony state, so `enrollmentAuthority` reports `local` again.
+ * This is the disconnect every plugin uses. Removing only the token is not
+ * enough: an approved state without a token is still vault mode and refuses,
+ * by design. It never contacts the credential daemon, so the enrollment stays
+ * approved in the vault until the operator revokes it there; a later Connect
+ * starts a new ceremony. A pending request is abandoned the same way.
+ *
+ * Takes the ceremony lock `reconcile()` and `resetClaustrumEnrollmentState`
+ * take, and returns `busy` without deleting anything while another process
+ * holds it. State naming another consumer refuses with `wrong-consumer` and
+ * both files stay. The token goes first: a crash between the two deletions
+ * leaves an approved state without a token, which is still vault mode (it
+ * refuses rather than falls back to local accounts), and calling this again
+ * finishes the job. Returns `idle` when neither file exists. Nothing else in
+ * the directory is touched. The token is removed without being parsed, so a
+ * corrupt token does not stand in the way. A malformed state file (bad JSON
+ * or wrong shape) is removed too, since it is what makes `enrollmentAuthority`
+ * report `unreadable`; a state file that fails the safety checks (symlink,
+ * wrong owner, not owner-only) refuses with `unsafe-file` and both files stay.
+ */
+export declare function disconnectClaustrumEnrollment(paths: ClaustrumEnrollmentPaths, proposedName: string): Promise<ClaustrumEnrollmentDisconnectResult>;

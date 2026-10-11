@@ -90,6 +90,7 @@ export interface MenuAction {
   readonly id: string
   readonly label: string
   readonly description?: string
+  readonly group?: string
   readonly knobs: readonly MenuKnob[]
   readonly confirm?: MenuConfirmation
 }
@@ -108,6 +109,8 @@ export interface MenuItem {
   readonly id: string
   readonly label: string
   readonly detail?: string
+  readonly group?: string
+  readonly status?: string
   readonly account?: MenuAccount
   readonly facts?: Readonly<Record<string, MenuFactValue>>
   readonly actions: readonly MenuAction[]
@@ -168,6 +171,8 @@ export interface MenuSelectOption {
   readonly title: string
   readonly value: string
   readonly description?: string
+  readonly category?: string
+  readonly footer?: string
 }
 
 /**
@@ -364,13 +369,14 @@ function action(value: unknown, path: string, issues: Issues): void {
   }
   onlyKeys(
     value,
-    ['id', 'label', 'description', 'knobs', 'confirm'],
+    ['id', 'label', 'description', 'group', 'knobs', 'confirm'],
     path,
     issues,
   )
   id(value.id, `${path}.id`, issues)
   str(value.label, `${path}.label`, issues)
   str(value.description, `${path}.description`, issues, true)
+  str(value.group, `${path}.group`, issues, true)
   if (!Array.isArray(value.knobs)) {
     issues.push(`${path}.knobs: expected a list`)
   } else {
@@ -434,13 +440,15 @@ function item(value: unknown, path: string, issues: Issues): void {
   }
   onlyKeys(
     value,
-    ['id', 'label', 'detail', 'account', 'facts', 'actions'],
+    ['id', 'label', 'detail', 'group', 'status', 'account', 'facts', 'actions'],
     path,
     issues,
   )
   id(value.id, `${path}.id`, issues)
   str(value.label, `${path}.label`, issues)
   str(value.detail, `${path}.detail`, issues, true)
+  str(value.group, `${path}.group`, issues, true)
+  str(value.status, `${path}.status`, issues, true)
   account(value.account, `${path}.account`, issues)
   facts(value.facts, `${path}.facts`, issues)
   actions(value.actions, `${path}.actions`, issues)

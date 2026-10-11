@@ -139,6 +139,8 @@ export interface GaTuiContext {
           readonly title: string
           readonly value: Value
           readonly description?: string
+          readonly category?: string
+          readonly footer?: string
         }[]
         readonly current?: Value
       }): Promise<Value | undefined>
@@ -387,11 +389,19 @@ function checkQuotaEntry(value: unknown, path: string, issues: Issues) {
     issues.push(`${path}: expected a quota reading`)
     return
   }
-  keys(value, ['remainingPercent'], ['resetAt', 'windows'], path, issues)
+  keys(
+    value,
+    ['remainingPercent'],
+    ['resetAt', 'windows', 'checkedAt'],
+    path,
+    issues,
+  )
   checkPercent(value.remainingPercent, `${path}.remainingPercent`, issues)
   if (value.resetAt !== undefined && !isTime(value.resetAt)) {
     issues.push(`${path}.resetAt: expected a time`)
   }
+  if (value.checkedAt !== undefined && !isTime(value.checkedAt))
+    issues.push(`${path}.checkedAt: expected a time`)
   if (value.windows === undefined) return
   if (!Array.isArray(value.windows) || value.windows.length > 4) {
     issues.push(`${path}.windows: expected at most four windows`)
@@ -403,10 +413,18 @@ function checkQuotaEntry(value: unknown, path: string, issues: Issues) {
       issues.push(`${at}: expected a window`)
       return
     }
-    keys(window, ['window', 'remainingPercent'], ['resetAt'], at, issues)
+    keys(
+      window,
+      ['window', 'remainingPercent'],
+      ['resetAt', 'checkedAt'],
+      at,
+      issues,
+    )
     if (window.window !== 'weekly' && window.window !== '5h') {
       issues.push(`${at}.window: unknown window`)
     }
+    if (window.checkedAt !== undefined && !isTime(window.checkedAt))
+      issues.push(`${at}.checkedAt: expected a time`)
     checkPercent(window.remainingPercent, `${at}.remainingPercent`, issues)
     if (window.resetAt !== undefined && !isTime(window.resetAt)) {
       issues.push(`${at}.resetAt: expected a time`)
@@ -1025,7 +1043,7 @@ function quotaLine(account: GaAccount, now: number): string {
   const pools = (projected?.quota ?? [])
     .map(
       (row) =>
-        `${row.label} ${row.remaining === null ? '—' : `${Math.round(row.remaining)}%`}${row.reset ? ` (${row.reset})` : ''}`,
+        `${row.label} ${row.figure}${row.reset ? ` · ${row.reset}` : ''}`,
     )
     .join(' · ')
   return `${account.label}: ${pools}`
@@ -1521,9 +1539,7 @@ function GaSidebar(props: {
                         justifyContent='space-between'
                         width='100%'
                       >
-                        <text>
-                          {`${row.label.padEnd(6)}${row.remaining === null ? '—' : `${Math.round(row.remaining)}%`}`}
-                        </text>
+                        <text>{`${row.label.padEnd(6)}${row.figure}`}</text>
                         <text>{row.reset}</text>
                       </box>
                     )}

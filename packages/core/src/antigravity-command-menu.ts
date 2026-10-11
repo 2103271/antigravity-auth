@@ -30,6 +30,7 @@ import type {
   RowRef,
 } from './account-repository-types.ts'
 import type { CommonAuthCommandsModule } from './common-auth-runtime.ts'
+import { formatAntigravityQuota } from './quota-presentation.ts'
 
 type Commands = CommonAuthCommandsModule
 type CommandMenu = ReturnType<Commands['createCommandMenu']>
@@ -278,20 +279,9 @@ function statusOf(row: AccountRow, now: number): string {
   return row.usable ? 'ready' : 'unusable'
 }
 
-function percent(fraction: number | null | undefined): string {
-  return typeof fraction === 'number' ? `${Math.round(fraction * 100)}%` : '–'
-}
-
 function quotaLine(row: AccountRow, position: number): string {
-  const label = `Account ${position + 1}`
-  if (row.quota.status !== 'present') return `${label}: no quota reading`
-  const groups = row.quota.quota.cachedQuota
-  if (!groups || Object.keys(groups).length === 0)
-    return `${label}: no quota reading`
-  const parts = Object.entries(groups).map(
-    ([name, group]) => `${name} ${percent(group.remainingFraction)}`,
-  )
-  return `${label}: ${parts.join(' · ')}`
+  const quota = row.quota.status === 'present' ? row.quota.quota : undefined
+  return `Account ${position + 1}: ${formatAntigravityQuota(quota, { now: Date.now() })}`
 }
 
 function failure(text: string, code: string): ActionOutcome {

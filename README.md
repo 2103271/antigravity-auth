@@ -266,7 +266,7 @@ pi
 /login google                    # OAuth flow
 ```
 
-The Pi extension registers the `google` provider automatically through the package's `pi.extensions` field; no further wiring is needed. Both packages delegate to `@cortexkit/antigravity-auth-core`, so the request transport and model transforms are shared. The account-pool layer is not: Pi holds a single credential locally (no `antigravity-accounts.json`, no rotation, no killswitch, no operator settings). Multi-account rotation, quota routing, and the killswitch are OpenCode-only.
+The Pi extension registers the `google` provider automatically through the package's `pi.extensions` field; no further wiring is needed. Both packages delegate to `@cortexkit/antigravity-auth-core`, so the request transport and model transforms are shared. The account-pool layer is not: In local mode, Pi uses one local credential; in vault mode, it uses one vault account at a time (no `antigravity-accounts.json`, no local rotation, no killswitch, no operator settings). Multi-account rotation, quota routing, and the killswitch are OpenCode-only. Use `/antigravity` for vault setup. Pi backs up its native Google login while vault mode serves and restores it on disconnect; `google/` model IDs do not change.
 
 ## Configuration reference
 

@@ -4062,7 +4062,7 @@ export async function runGaRawTlsCase(
         !request.rawHeaders.some(
           (header, index) =>
             index % 2 === 0 &&
-            /^(x-opencode-session|x-opencode-parent-session-id|x-session-affinity|x-session-id|x-parent-session-id)$/i.test(
+            /^(x-opencode-session(?:-id)?|x-opencode-parent-session-id|x-session-affinity|x-session-id|x-parent-session-id)$/i.test(
               header,
             ),
         ),

@@ -50,8 +50,21 @@ function liveOwnedDescendant(
   if (!match || Number(match[1]) !== pid)
     throw new Error('owned descendant identity unavailable')
   if (match[3]?.startsWith('Z')) return false
-  if (!match[4]?.includes(nonce) || Number(match[2]) !== group)
+  if (!match[4]?.includes(nonce) || Number(match[2]) !== group) {
+    console.error(
+      JSON.stringify({
+        kind: 'owned-descendant-probe-refusal',
+        expected: { pid, group },
+        observed: {
+          pid: Number(match[1]),
+          group: Number(match[2]),
+          state: match[3],
+          noncePresent: match[4]?.includes(nonce),
+        },
+      }),
+    )
     throw new Error('owned descendant identity/group changed')
+  }
   return true
 }
 

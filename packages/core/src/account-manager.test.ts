@@ -58,6 +58,27 @@ const stored: AccountStorageV4 = {
 }
 
 describe('core AccountManager', () => {
+  it('persists pool-file request counts without needing another selection or mutation', async () => {
+    const memory = createStore(stored)
+    const manager = new AccountManager(undefined, stored, {
+      store: memory.store,
+    })
+    try {
+      await manager.flushSaveToDisk()
+      const before = memory.mergedSaves()
+      manager.recordRequest(1, 'gemini')
+      manager.recordRequest(1, 'gemini')
+      await manager.flushSaveToDisk()
+      expect(memory.state()?.accounts[1]?.dailyRequestCounts?.gemini).toBe(2)
+      expect(
+        memory.state()?.accounts[0]?.dailyRequestCounts?.gemini,
+      ).toBeUndefined()
+      expect(memory.mergedSaves()).toBeGreaterThan(before)
+    } finally {
+      await manager.dispose()
+    }
+  })
+
   it('constructs from stored and fallback auth', () => {
     const memory = createStore(stored)
     const manager = new AccountManager(

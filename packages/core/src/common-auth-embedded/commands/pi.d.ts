@@ -16,7 +16,8 @@ export interface PiMenuOptions {
 /**
  * Runs one invocation of the slash command on Pi: sections, then an item or
  * a section action, then the action's inputs and confirmation; after each
- * apply the user is back in the same section with the refreshed menu. Backing
+ * apply the user is back in the same section with the refreshed menu. Each
+ * section's list ends with Back, which returns to the section list; backing
  * out of the section list ends the invocation.
  */
 export declare function runPiCommandMenu(menu: CommandMenu, ui: PiMenuUi, options?: PiMenuOptions): Promise<void>;

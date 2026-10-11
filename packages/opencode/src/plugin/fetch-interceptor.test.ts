@@ -24,6 +24,10 @@ import {
 } from './fetch-interceptor'
 import { AgySessionRegistry } from './session-context'
 import type { VaultRequestSource } from './shared/vault-request-credentials'
+import {
+  createVaultAccountPool,
+  type VaultAccountPool,
+} from './shared/vault-request-credentials'
 import { type AccountStorageV4, saveAccountsReplace } from './storage'
 import type { GetAuth, PluginClient } from './types'
 
@@ -134,6 +138,7 @@ function fakeClient(onToast?: (message: string) => void): PluginClient {
 }
 
 interface ContextOverrides {
+  assertAdmission?: () => Promise<void>
   accountManager?: AccountManager
   config?: typeof DEFAULT_CONFIG
   getAuth?: GetAuth
@@ -178,6 +183,7 @@ async function makeContext(overrides: ContextOverrides = {}) {
     )
 
   return {
+    assertAdmission: overrides.assertAdmission,
     client: overrides.client ?? fakeClient(),
     directory,
     providerId: 'google',
@@ -384,21 +390,71 @@ describe('createFetchInterceptor', () => {
       const interceptor = createFetchInterceptor(context)
       const controller = new AbortController()
 
-      // Abort before the call so the no-account short-circuit surfaces the
-      // signal back to the caller via the upstream passthrough. The test is
-      // a contract guard for "abort propagation is not silently dropped".
+      // Cancellation wins over account admission, rather than becoming a 401.
       controller.abort()
       await expect(
         interceptor.fetch(GENERATIVE_URL, {
           method: 'POST',
           signal: controller.signal,
         }),
-      ).resolves.toMatchObject({ status: 401 })
-      interceptor.dispose()
+      ).rejects.toBe(controller.signal.reason)
+      await interceptor.dispose()
     })
   })
 
   describe('lifecycle disposal', () => {
+    it('joins an admitted unit through repeated disposal calls before releasing its resources', async () => {
+      const context = await makeContext()
+      let release: () => void = () => {}
+      let signalStarted: () => void = () => {}
+      const held = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve
+      })
+      let admissions = 0
+      const interceptor = createFetchInterceptor({
+        ...context,
+        assertAdmission: async () => {
+          if (++admissions === 2) {
+            signalStarted()
+            await held
+          }
+        },
+      })
+      const request = interceptor.fetch(GENERATIVE_URL, { method: 'POST' })
+      const outcome = request.then(
+        (response) => ({ kind: 'resolved' as const, response }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      )
+      try {
+        await started
+        const first = interceptor.dispose()
+        const second = interceptor.dispose()
+        expect(second).toBe(first)
+        let closed = false
+        void Promise.resolve(second).then(() => {
+          closed = true
+        })
+        await Promise.resolve()
+        expect(closed).toBe(false)
+        release()
+        await Promise.all([first, second])
+        const result = await outcome
+        expect(result.kind).toBe('rejected')
+        if (result.kind !== 'rejected')
+          throw new Error('Disposed request completed successfully')
+        expect(result.error).toMatchObject({
+          message: 'The Antigravity request executor is disposed',
+        })
+        expect(closed).toBe(true)
+      } finally {
+        release()
+        await interceptor.dispose()
+        await outcome
+      }
+    })
     it('clears per-instance retry/warmup state on dispose()', async () => {
       const context = await makeContext()
       const interceptor = createFetchInterceptor(context)
@@ -1332,7 +1388,10 @@ describe('createFetchInterceptor', () => {
       return { source, admitted, reported, refreshes: () => refreshes }
     }
 
-    async function vaultInterceptor(source: VaultRequestSource) {
+    async function vaultInterceptor(
+      source: VaultRequestSource,
+      pool?: VaultAccountPool,
+    ) {
       const context = await makeContext({
         config: {
           ...DEFAULT_CONFIG,
@@ -1349,6 +1408,7 @@ describe('createFetchInterceptor', () => {
         agySessionRegistry: context.agySessionRegistry,
         agyTransport: context.agyTransport,
         source,
+        ...(pool && { pool }),
       })
     }
 
@@ -1374,6 +1434,30 @@ describe('createFetchInterceptor', () => {
         project: (JSON.parse(String(init.body)) as { project: string }).project,
       }
     }
+
+    it('uses the same vault selector that supplies the menu and sidebar rows', async () => {
+      const vault = vaultSource()
+      const pool = createVaultAccountPool({ source: vault.source })
+      await pool.sync()
+      const account = pool.selector.rows[0]
+      if (!account) throw new Error('the shared vault pool has no account')
+      const before = account.lastUsed
+      transportMock.mockResolvedValueOnce(okJson())
+      const interceptor = await vaultInterceptor(vault.source, pool)
+      try {
+        const response = await interceptor.fetch(
+          NON_STREAM_URL,
+          GENERATIVE_INIT,
+        )
+        await response.text()
+        expect(pool.selector.rows[0]).toBe(account)
+        expect(account.lastUsed).toBeGreaterThan(before)
+        expect(vault.refreshes()).toBe(1)
+        expect(vault.admitted).toHaveLength(1)
+      } finally {
+        await interceptor.dispose()
+      }
+    })
 
     it("admits every physical attempt and sends with that receipt's token and project", async () => {
       const vault = vaultSource()
@@ -1489,4 +1573,47 @@ describe('createFetchInterceptor', () => {
       b.dispose()
     })
   })
+})
+
+it('admits no further local physical attempt when enrollment changes during a failed send', async () => {
+  let local = true
+  let physicalAttempts = 0
+  const context = await makeContext({
+    assertAdmission: async () => {
+      if (!local) throw new Error('Local work is excluded by vault enrollment')
+    },
+    agyTransport: async () => {
+      physicalAttempts += 1
+      if (physicalAttempts === 1) {
+        local = false
+        throw new Error('synthetic pre-header transport failure')
+      }
+      return new Response(
+        JSON.stringify({
+          response: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ text: 'synthetic response after forbidden retry' }],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      )
+    },
+  })
+  const interceptor = createFetchInterceptor(context)
+  try {
+    await expect(
+      interceptor.fetch(GENERATIVE_URL, GENERATIVE_INIT),
+    ).rejects.toThrow('Local work is excluded by vault enrollment')
+    expect(physicalAttempts).toBe(1)
+  } finally {
+    await interceptor.dispose()
+    await context.accountManager.dispose()
+  }
 })

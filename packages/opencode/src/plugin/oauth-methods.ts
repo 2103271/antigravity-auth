@@ -1,12 +1,18 @@
 import { exec } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { type RowRef, sameRowRef } from '@cortexkit/antigravity-auth-core'
+import {
+  formatAntigravityQuota,
+  type RowRef,
+  sameRowRef,
+  VAULT_ACCOUNT_REMEDY,
+} from '@cortexkit/antigravity-auth-core'
 import type { AuthOAuthResult as V1AuthOAuthResult } from '@opencode-ai/plugin'
 import type { AntigravityTokenExchangeResult } from '../antigravity/oauth'
 import {
   authorizeAntigravity as defaultAuthorizeAntigravity,
   exchangeAntigravity as defaultExchangeAntigravity,
 } from '../antigravity/oauth'
+import { formatQuotaReading } from '../quota-presentation'
 import type {
   AccountAccessService,
   RepositoryAccountAccessService,
@@ -90,6 +96,7 @@ export interface OAuthMethodDependencies {
 }
 
 interface CreateOAuthMethodsOptions {
+  mayStartLocalWork?: () => Promise<boolean>
   client: PluginClient
   providerId: string
   config: AntigravityConfig
@@ -296,30 +303,18 @@ function buildAuthSuccessFromStoredAccount(account: {
 }
 
 function formatCachedQuotaSummary(account: {
+  cachedQuotaUpdatedAt?: number
   cachedQuota?: Record<
     string,
     { remainingFraction?: number; resetTime?: string }
   >
 }): string | undefined {
   return account.cachedQuota
-    ? formatCachedQuotaWithStatus(account.cachedQuota)
+    ? formatCachedQuotaWithStatus(
+        account.cachedQuota,
+        account.cachedQuotaUpdatedAt,
+      )
     : undefined
-}
-
-function formatWaitTime(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const seconds = Math.ceil(ms / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
-  if (minutes < 60) {
-    return remainingSeconds > 0
-      ? `${minutes}m ${remainingSeconds}s`
-      : `${minutes}m`
-  }
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
 }
 
 export function createOAuthMethods({
@@ -331,6 +326,7 @@ export function createOAuthMethods({
   quotaManager: injectedQuotaManager,
   getAuth = null,
   dependencies,
+  mayStartLocalWork,
 }: CreateOAuthMethodsOptions): AuthMethod[] {
   const deps: OAuthMethodDependencies = {
     authorize: dependencies?.authorize ?? defaultAuthorizeAntigravity,
@@ -443,6 +439,8 @@ export function createOAuthMethods({
       label: 'OAuth with Google (Antigravity)',
       type: 'oauth',
       authorize: async (inputs?: Record<string, string>) => {
+        if (mayStartLocalWork && !(await mayStartLocalWork()))
+          throw new Error(VAULT_ACCOUNT_REMEDY)
         const isHeadless = deps.isHeadless()
 
         // CLI flow (`opencode auth login`) passes an inputs object.
@@ -636,9 +634,7 @@ export function createOAuthMethods({
                     isCurrentAccount:
                       idx === (existingStorage.activeIndex ?? 0),
                     enabled: acc.enabled !== false,
-                    quotaSummary: quotaIsStale
-                      ? undefined
-                      : formatCachedQuotaSummary(acc),
+                    quotaSummary: formatCachedQuotaSummary(acc),
                     cooldownMs,
                     cooldownReason: cooldownMs ? acc.cooldownReason : undefined,
                     cachedQuota: displayQuota,
@@ -720,38 +716,7 @@ export function createOAuthMethods({
                     const empty = width - filled
                     const color = getColor(remaining)
                     const bar = `${color}${'█'.repeat(filled)}${colors.reset}${'░'.repeat(empty)}`
-                    const pct =
-                      `${color}${Math.round(remaining * 100)}%${colors.reset}`.padStart(
-                        4 + color.length + colors.reset.length,
-                      )
-                    return `${bar} ${pct}`
-                  }
-
-                  // Helper to format reset time with days support
-                  const formatReset = (
-                    resetTime?: string,
-                    remainingFraction?: number,
-                  ): string => {
-                    if (!resetTime) return ''
-                    const ms = Date.parse(resetTime) - Date.now()
-                    if (ms <= 0) {
-                      // If quota is 0% and reset time is in the past, the model is
-                      // likely paywalled / permanently unavailable on this quota pool
-                      return remainingFraction !== undefined &&
-                        remainingFraction <= 0
-                        ? ' (paid only)'
-                        : ' (resetting...)'
-                    }
-                    const hours = ms / (1000 * 60 * 60)
-                    if (hours >= 24) {
-                      const days = Math.floor(hours / 24)
-                      const remainingHours = Math.floor(hours % 24)
-                      if (remainingHours > 0) {
-                        return ` (resets in ${days}d ${remainingHours}h)`
-                      }
-                      return ` (resets in ${days}d)`
-                    }
-                    return ` (resets in ${formatWaitTime(ms)})`
+                    return bar
                   }
 
                   // Display Gemini CLI Quota first (as requested - swap order)
@@ -769,9 +734,19 @@ export function createOAuthMethods({
                       const isLast = idx === models.length - 1
                       const connector = isLast ? '└─' : '├─'
                       const bar = createProgressBar(model.remainingFraction)
-                      const reset = formatReset(
-                        model.resetTime,
-                        model.remainingFraction,
+                      const text = formatQuotaReading(
+                        model.modelId,
+                        {
+                          remainingPercent:
+                            typeof model.remainingFraction === 'number'
+                              ? model.remainingFraction * 100
+                              : Number.NaN,
+                          checkedAt: res.checkedAt,
+                          ...(model.resetTime
+                            ? { resetAt: Date.parse(model.resetTime) }
+                            : {}),
+                        },
+                        Date.now(),
                       )
                       const status = classifyGroupStatus({
                         remainingFraction: model.remainingFraction,
@@ -779,10 +754,7 @@ export function createOAuthMethods({
                         modelCount: 1,
                       })
                       const badge = formatQuotaStatusBadge(status)
-                      const modelName = model.modelId.padEnd(29)
-                      console.log(
-                        `  │  ${connector} ${modelName} ${bar} ${badge}${reset}`,
-                      )
+                      console.log(`  │  ${connector} ${text} ${bar} ${badge}`)
                     })
                   }
 
@@ -798,24 +770,24 @@ export function createOAuthMethods({
                   } else {
                     const groups = res.quota!.groups
                     const groupEntries = [
-                      { name: 'Non-Gemini', data: groups['non-gemini'] },
-                      { name: 'Gemini', data: groups.gemini },
+                      { key: 'non-gemini', data: groups['non-gemini'] },
+                      { key: 'gemini', data: groups.gemini },
                     ].filter((g) => g.data)
 
                     groupEntries.forEach((g, idx) => {
                       const isLast = idx === groupEntries.length - 1
                       const connector = isLast ? '└─' : '├─'
                       const bar = createProgressBar(g.data!.remainingFraction)
-                      const reset = formatReset(
-                        g.data!.resetTime,
-                        g.data!.remainingFraction,
+                      const text = formatAntigravityQuota(
+                        {
+                          cachedQuota: { [g.key]: g.data! },
+                          cachedQuotaUpdatedAt: res.checkedAt,
+                        },
+                        { now: Date.now() },
                       )
                       const status = classifyGroupStatus(g.data!)
                       const badge = formatQuotaStatusBadge(status)
-                      const modelName = g.name.padEnd(29)
-                      console.log(
-                        `     ${connector} ${modelName} ${bar} ${badge}${reset}`,
-                      )
+                      console.log(`     ${connector} ${text} ${bar} ${badge}`)
                     })
                   }
                   console.log('')
@@ -824,7 +796,8 @@ export function createOAuthMethods({
                   const targetRefreshToken =
                     existingStorage.accounts[res.index]?.refreshToken
                   if (!targetRefreshToken) continue
-                  const updatedAt = Date.now()
+                  const updatedAt = res.checkedAt
+                  if (updatedAt === undefined) continue
                   const existing = quotaUpdates.get(targetRefreshToken)
                   quotaUpdates.set(targetRefreshToken, {
                     quota: res.quota?.groups,

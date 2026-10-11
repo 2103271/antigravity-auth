@@ -149,12 +149,6 @@ function harness(): Harness {
   }
   h.module = {
     ClaustrumConsumer: FakeConsumer,
-    assertHostSlotMatchesMode(input) {
-      h.hostSlotChecks.push(input)
-      if (input.mode === 'custody' && input.auth === 'real-login')
-        throw new Error('host-slot-login')
-      return 'placeholder'
-    },
     // Retry only when the vault now serves a different record version of the
     // same credential and account (the library's `isScopedCredentialRotation`).
     decideScopedRetryAfter401(
@@ -218,13 +212,11 @@ function source(h: Harness): AntigravityVaultAccountSource {
   return createAntigravityVaultAccountSource({
     claustrum: h.module,
     host: 'pi',
-    hostProvider: 'google',
     rosterPath: join(dir, 'roster.json'),
     tokenPath: join(dir, 'token.json'),
     connect: () =>
       Promise.reject(new Error('the fake consumer never connects')),
     isCustodyActive: () => custodyActive,
-    readHostSlot: () => hostSlot,
     reporterSource: 'direct',
     state: { path: join(dir, 'state.json'), fs: fakeFs },
     onError: (error) => errors.push(error),
@@ -474,8 +466,8 @@ describe('served 401 reporting', () => {
   })
 })
 
-describe('custody, host slot and decline fencing', () => {
-  it('refuses before authorizing when custody is off or the host slot holds a login', async () => {
+describe('custody and decline fencing', () => {
+  it('refuses before authorizing when custody is off, but leaves dormant local logins alone', async () => {
     const h = harness()
     const src = source(h)
     const [ref] = src.routes()
@@ -484,13 +476,14 @@ describe('custody, host slot and decline fencing', () => {
     await expect(src.admit(ref)).rejects.toMatchObject({ kind: 'not-active' })
     custodyActive = true
     hostSlot = 'real-login'
-    await expect(src.admit(ref)).rejects.toThrow('host-slot-login')
     expect(h.authorized).toEqual([])
-    expect(h.hostSlotChecks.at(-1)).toEqual({
-      mode: 'custody',
-      auth: 'real-login',
-      provider: 'google',
+    h.receipts.push(receipt(5))
+    await expect(src.admit(ref)).resolves.toMatchObject({
+      routeId: ref.routeId,
+      accountIdentity: ref.accountIdentity,
     })
+    expect(h.authorized).toEqual([ref.routeId])
+    expect(hostSlot).toBe('real-login')
   })
 
   it('refuses a ref whose route was declined or rebound after selection', async () => {
@@ -592,7 +585,7 @@ describe('provider-state commits through the source', () => {
     ).rejects.toMatchObject({ kind: 'identity-contradicted' })
   })
 
-  it('refuses a commit while the host slot holds a login', async () => {
+  it('commits only vault state while an independent local login remains unchanged', async () => {
     const h = harness()
     const src = source(h)
     const [ref] = src.routes()
@@ -600,12 +593,11 @@ describe('provider-state commits through the source', () => {
     h.receipts.push(receipt(5), receipt(5))
     const admission = await src.admit(ref)
     hostSlot = 'real-login'
-    await expect(
-      src.commitState(src.attribution(admission), () => ({
-        metadata: { addedAt: 1, lastUsed: 2 },
-      })),
-    ).rejects.toThrow('host-slot-login')
-    expect(h.authorized).toHaveLength(1)
+    await src.commitState(src.attribution(admission), () => ({
+      metadata: { addedAt: 1, lastUsed: 2 },
+    }))
+    expect(h.authorized).toHaveLength(2)
+    expect(hostSlot).toBe('real-login')
   })
 })
 
@@ -673,7 +665,7 @@ describe('cancellation', () => {
 })
 
 describe('genuine public common-auth modules', () => {
-  it('binds the real ./claustrum and ./fs modules and fences the host slot before connecting', async () => {
+  it('binds the real ./claustrum and ./fs modules and refuses unknown routes without connecting', async () => {
     const claustrum = await loadCommonAuthClaustrum()
     const port: VaultClaustrumPort = claustrum
     const stateFs: AntigravityVaultStateFs = await loadCommonAuthFs()
@@ -681,7 +673,6 @@ describe('genuine public common-auth modules', () => {
     const src = createAntigravityVaultAccountSource({
       claustrum: port,
       host: 'opencode',
-      hostProvider: 'google',
       rosterPath: join(dir, 'roster.json'),
       tokenPath: join(dir, 'token.json'),
       connect: () => {
@@ -689,7 +680,6 @@ describe('genuine public common-auth modules', () => {
         return Promise.reject(new Error('no vault in tests'))
       },
       isCustodyActive: () => custodyActive,
-      readHostSlot: () => hostSlot,
       reporterSource: 'direct',
       state: { path: join(dir, 'state.json'), fs: stateFs },
     })
@@ -702,7 +692,7 @@ describe('genuine public common-auth modules', () => {
     }
     hostSlot = { type: 'oauth', access: 'a', refresh: 'host-login', expires: 1 }
     await expect(src.admit(ref)).rejects.toMatchObject({
-      kind: 'host-slot-login',
+      kind: 'route-unavailable',
     })
     hostSlot = claustrum.custodyPlaceholder('google')
     await expect(src.admit(ref)).rejects.toMatchObject({
@@ -822,12 +812,10 @@ async function realSource(vault: LocalVault) {
   const src = createAntigravityVaultAccountSource({
     claustrum,
     host: 'pi',
-    hostProvider: 'google',
     rosterPath,
     tokenPath,
     connect: async () => client,
     isCustodyActive: () => custodyActive,
-    readHostSlot: () => hostSlot,
     reporterSource: 'direct',
     state: { path: join(dir, 'state.json'), fs },
     logger: SILENT,
@@ -997,14 +985,19 @@ describe('real public consumer with a local vault transport', () => {
     expect(vault.gets).toEqual([])
   })
 
-  it('refuses before fetching a credential while the host slot holds a login', async () => {
+  it('uses the vault receipt without changing a dormant native login', async () => {
     const vault = localVault()
+    vault.served.push(servedCredential(1))
     const { src, ref } = await realSource(vault)
     hostSlot = { type: 'oauth', access: 'a', refresh: 'host-login', expires: 1 }
-    await expect(src.admit(ref)).rejects.toMatchObject({
-      kind: 'host-slot-login',
+    const before = JSON.stringify(hostSlot)
+    await expect(src.admit(ref)).resolves.toMatchObject({
+      routeId: ref.routeId,
+      accountIdentity: ref.accountIdentity,
+      credentialId: ref.credentialId,
     })
-    expect(vault.gets).toEqual([])
+    expect(vault.gets).toHaveLength(1)
+    expect(JSON.stringify(hostSlot)).toBe(before)
   })
 
   it('abandons a credential fetch when the caller aborts and never dispatches', async () => {

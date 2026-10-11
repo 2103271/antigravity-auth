@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "package": "@cortexkit/common-auth",
-  "version": "0.12.0",
+  "version": "0.14.1",
   "artifactStatus": "released",
   "publicRoots": {
     "./store": {
@@ -31,33 +31,37 @@
     "./quota": {
       "types": "./dist/quota/index.d.ts",
       "import": "./dist/quota/index.js"
+    },
+    "./pi-slot": {
+      "types": "./dist/pi-slot/index.d.ts",
+      "import": "./dist/pi-slot/index.js"
     }
   },
-  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.12.0.tgz",
-  "tarballSha256": "35ce4c601c94e8aba94762fade7895047b3038b70c0d93753aa4d955bb04e951",
-  "sri": "sha512-iQBupjakoHW1J3r1I+WUARSNf5D/32pxKaldmSn/KfikdnDUN4f6Z9aEEg+8A4wvt10zaMWSuKQc60roQc6bIA==",
-  "canonicalFiles": 121,
-  "canonicalBytes": 648870,
+  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.14.1.tgz",
+  "tarballSha256": "544304bbcc287aa93cb2a94938e20c80e07509ebbcafbc6b784a3893187868fb",
+  "sri": "sha512-QNoECbEdYHMx6tv6SK2FFOq+lnweB6Krr+1SDrOT3jCntfSMs4JpuCDYixnprsbnVmfqjezc4UmbkgoQpWd3LQ==",
+  "canonicalFiles": 128,
+  "canonicalBytes": 692323,
   "generator": {
     "path": "packages/opencode/scripts/embed-common-auth.ts",
     "version": 3,
-    "sha256": "5ecae9c1ef391e8aa9812e9266c7001c9a5f0e64d8c0533bfbe4dc1ec56e9f52"
+    "sha256": "27cd90bd3555cd92066edb5754e490162c1725c66da59d2789643c340458ecac"
   },
   "files": [
     {
       "source": "package/dist/auth-menu/accounts.d.ts",
       "output": "auth-menu/accounts.d.ts",
-      "bytes": 4800,
-      "sourceSha256": "b107330a91ee49899c05ca620999a2900e5bb9f59f1e103c0714e920d0bf3c92",
-      "outputSha256": "b107330a91ee49899c05ca620999a2900e5bb9f59f1e103c0714e920d0bf3c92",
+      "bytes": 5145,
+      "sourceSha256": "581ce15f0fcb2c7ca091276bd8e365d1638ba9b30ea3c3e0246e5be48ff44dff",
+      "outputSha256": "581ce15f0fcb2c7ca091276bd8e365d1638ba9b30ea3c3e0246e5be48ff44dff",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/auth-menu/accounts.js",
       "output": "auth-menu/accounts.js",
-      "bytes": 15562,
-      "sourceSha256": "06295d98dd6720b2ae6925bf3181dedae6067c4e1aa14325e74593d1ff7f5366",
-      "outputSha256": "06295d98dd6720b2ae6925bf3181dedae6067c4e1aa14325e74593d1ff7f5366",
+      "bytes": 15204,
+      "sourceSha256": "6f85dc69b3bdabb8a868d5408df6030771937f33a5b2b6ec6716dfee153dd5c9",
+      "outputSha256": "6f85dc69b3bdabb8a868d5408df6030771937f33a5b2b6ec6716dfee153dd5c9",
       "transform": "verbatim"
     },
     {
@@ -239,17 +243,17 @@
     {
       "source": "package/dist/claustrum/enrollment.d.ts",
       "output": "claustrum/enrollment.d.ts",
-      "bytes": 5516,
-      "sourceSha256": "3968bc66ce52a6affb6553342f5688fb8c830e08a43ef9c5ed1156f5e87a1feb",
-      "outputSha256": "3968bc66ce52a6affb6553342f5688fb8c830e08a43ef9c5ed1156f5e87a1feb",
+      "bytes": 7453,
+      "sourceSha256": "855f7cd2a52665c4a699bd9b8a06e50a807a21012e7ef031146aaeb0599d71e4",
+      "outputSha256": "855f7cd2a52665c4a699bd9b8a06e50a807a21012e7ef031146aaeb0599d71e4",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/claustrum/enrollment.js",
       "output": "claustrum/enrollment.js",
-      "bytes": 26529,
-      "sourceSha256": "60cb355ebec28c3d750d6cdfe685071437a5b43f3c1b9b6e0fa11e0570c10d46",
-      "outputSha256": "60cb355ebec28c3d750d6cdfe685071437a5b43f3c1b9b6e0fa11e0570c10d46",
+      "bytes": 31343,
+      "sourceSha256": "be5dadd916be59dfa8234c9d7d4e98c5d9d94a17e46483690bd468a3e9dca051",
+      "outputSha256": "be5dadd916be59dfa8234c9d7d4e98c5d9d94a17e46483690bd468a3e9dca051",
       "transform": "verbatim"
     },
     {
@@ -287,17 +291,17 @@
     {
       "source": "package/dist/claustrum/index.d.ts",
       "output": "claustrum/index.d.ts",
-      "bytes": 2641,
-      "sourceSha256": "c21d5776b641faa79cff179154894ecd836774ec66264ee1f7e043ee4b085ed2",
-      "outputSha256": "c21d5776b641faa79cff179154894ecd836774ec66264ee1f7e043ee4b085ed2",
+      "bytes": 2735,
+      "sourceSha256": "b1b1184bed9c3586017123c06725750dd3f7d2ac3b2710e65ed9b3f3075210af",
+      "outputSha256": "b1b1184bed9c3586017123c06725750dd3f7d2ac3b2710e65ed9b3f3075210af",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/claustrum/index.js",
       "output": "claustrum/index.js",
-      "bytes": 1915,
-      "sourceSha256": "2a746e9fca574b0378dfbd562567b94c8efad2be8a4e7b4ad198ef0d6d6c6b6a",
-      "outputSha256": "2a746e9fca574b0378dfbd562567b94c8efad2be8a4e7b4ad198ef0d6d6c6b6a",
+      "bytes": 1967,
+      "sourceSha256": "ced1f8aa152e634ce9d5e4088e25985822ae0e280344e0de903e4320c850d864",
+      "outputSha256": "ced1f8aa152e634ce9d5e4088e25985822ae0e280344e0de903e4320c850d864",
       "transform": "verbatim"
     },
     {
@@ -343,9 +347,9 @@
     {
       "source": "package/dist/commands/builtins.js",
       "output": "commands/builtins.js",
-      "bytes": 20295,
-      "sourceSha256": "ba076cc0bcee17c2422df7e5dd8eddc529f91e61dc0fee83cfa1ef4d532d0c01",
-      "outputSha256": "ba076cc0bcee17c2422df7e5dd8eddc529f91e61dc0fee83cfa1ef4d532d0c01",
+      "bytes": 21323,
+      "sourceSha256": "9b3461ace8a585dde5eff3f9b709ddc766ab3d77e680b687499efd1871a341ce",
+      "outputSha256": "9b3461ace8a585dde5eff3f9b709ddc766ab3d77e680b687499efd1871a341ce",
       "transform": "verbatim"
     },
     {
@@ -383,9 +387,9 @@
     {
       "source": "package/dist/commands/model.d.ts",
       "output": "commands/model.d.ts",
-      "bytes": 5982,
-      "sourceSha256": "6bed9fe5bdd19bb33c05140a1389b10501c03a0767e2f9dd01ef91dca3386819",
-      "outputSha256": "6bed9fe5bdd19bb33c05140a1389b10501c03a0767e2f9dd01ef91dca3386819",
+      "bytes": 7986,
+      "sourceSha256": "0b70d9cc750184dee6d4c1e7f117ec60417ab7889752ab9f0516694bae0524f2",
+      "outputSha256": "0b70d9cc750184dee6d4c1e7f117ec60417ab7889752ab9f0516694bae0524f2",
       "transform": "verbatim"
     },
     {
@@ -399,17 +403,17 @@
     {
       "source": "package/dist/commands/pi.d.ts",
       "output": "commands/pi.d.ts",
-      "bytes": 987,
-      "sourceSha256": "6893bfe1a9a48fc5efe4ce5a54d9a0a56df699402afc01ac544fbbd8ee757090",
-      "outputSha256": "6893bfe1a9a48fc5efe4ce5a54d9a0a56df699402afc01ac544fbbd8ee757090",
+      "bytes": 1061,
+      "sourceSha256": "bd63b8b9118610fb8cb18d370cc154d3ef3cf3eab30c6d2c4398e3afe78f06c8",
+      "outputSha256": "bd63b8b9118610fb8cb18d370cc154d3ef3cf3eab30c6d2c4398e3afe78f06c8",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/commands/pi.js",
       "output": "commands/pi.js",
-      "bytes": 7035,
-      "sourceSha256": "16680cefa027a8209977bed69be0e11299538c3068bcd95e5c202fa37d4021c4",
-      "outputSha256": "16680cefa027a8209977bed69be0e11299538c3068bcd95e5c202fa37d4021c4",
+      "bytes": 8194,
+      "sourceSha256": "16bf28350d273af67ceed074ebf89af38cf5e8f32d2869a3a77d80488e4400b4",
+      "outputSha256": "16bf28350d273af67ceed074ebf89af38cf5e8f32d2869a3a77d80488e4400b4",
       "transform": "verbatim"
     },
     {
@@ -423,9 +427,9 @@
     {
       "source": "package/dist/commands/seam.js",
       "output": "commands/seam.js",
-      "bytes": 11091,
-      "sourceSha256": "0396a515b98c5aa10299fbaaffdfd8a47e8ee80fdc8f95e9bcce9337db66f3b7",
-      "outputSha256": "0396a515b98c5aa10299fbaaffdfd8a47e8ee80fdc8f95e9bcce9337db66f3b7",
+      "bytes": 11326,
+      "sourceSha256": "856649e0849e61d77201abae978ab69c4aa4613361468411da97ef0e0fb74584",
+      "outputSha256": "856649e0849e61d77201abae978ab69c4aa4613361468411da97ef0e0fb74584",
       "transform": "verbatim"
     },
     {
@@ -573,6 +577,46 @@
       "transform": "verbatim"
     },
     {
+      "source": "package/dist/pi-slot/index.d.ts",
+      "output": "pi-slot/index.d.ts",
+      "bytes": 230,
+      "sourceSha256": "8b2c9f002a5f8ee7f5e1da5ed2f1e13e0acfbeb0c8d9f0296d5215c3150e8798",
+      "outputSha256": "8b2c9f002a5f8ee7f5e1da5ed2f1e13e0acfbeb0c8d9f0296d5215c3150e8798",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/pi-slot/index.js",
+      "output": "pi-slot/index.js",
+      "bytes": 138,
+      "sourceSha256": "4364d23400afcc9650b055673cccceacd2c1239bac4abe6cda34cf1e34a88472",
+      "outputSha256": "4364d23400afcc9650b055673cccceacd2c1239bac4abe6cda34cf1e34a88472",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/pi-slot/lock.js",
+      "output": "pi-slot/lock.js",
+      "bytes": 7109,
+      "sourceSha256": "92ad2fbf7792624b8dae99d7239e1e6f0f7d7f6da10be8b1594500700c7c3077",
+      "outputSha256": "92ad2fbf7792624b8dae99d7239e1e6f0f7d7f6da10be8b1594500700c7c3077",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/pi-slot/slot.d.ts",
+      "output": "pi-slot/slot.d.ts",
+      "bytes": 2214,
+      "sourceSha256": "02d78c35ec1f3b336db91c1267c7a85d8e93736c24dce5df1818d8fa85321ba3",
+      "outputSha256": "02d78c35ec1f3b336db91c1267c7a85d8e93736c24dce5df1818d8fa85321ba3",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/pi-slot/slot.js",
+      "output": "pi-slot/slot.js",
+      "bytes": 13872,
+      "sourceSha256": "f7a5a70d074a0890833ffded094fb09036b6199db2570a775dfb7cbc32303957",
+      "outputSha256": "f7a5a70d074a0890833ffded094fb09036b6199db2570a775dfb7cbc32303957",
+      "transform": "verbatim"
+    },
+    {
       "source": "package/dist/quota/codec.d.ts",
       "output": "quota/codec.d.ts",
       "bytes": 451,
@@ -589,19 +633,35 @@
       "transform": "verbatim"
     },
     {
+      "source": "package/dist/quota/format.d.ts",
+      "output": "quota/format.d.ts",
+      "bytes": 2345,
+      "sourceSha256": "87ec0c819d5ba567bcd106abe0a224d91daa030fe33942b33f931e6ea833cf5b",
+      "outputSha256": "87ec0c819d5ba567bcd106abe0a224d91daa030fe33942b33f931e6ea833cf5b",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/quota/format.js",
+      "output": "quota/format.js",
+      "bytes": 5819,
+      "sourceSha256": "a6911f852a33e5305d7ea86bd2fe0c62e12207e17e01b11b23db6e1de7b1aea7",
+      "outputSha256": "a6911f852a33e5305d7ea86bd2fe0c62e12207e17e01b11b23db6e1de7b1aea7",
+      "transform": "verbatim"
+    },
+    {
       "source": "package/dist/quota/index.d.ts",
       "output": "quota/index.d.ts",
-      "bytes": 750,
-      "sourceSha256": "1de7e579405b6c872463560006cc4b9c8636dda5dd36b90d784f2aa507c30ec2",
-      "outputSha256": "1de7e579405b6c872463560006cc4b9c8636dda5dd36b90d784f2aa507c30ec2",
+      "bytes": 955,
+      "sourceSha256": "c51ad163eb1a16d20d88773abdeab90aea1e7c5543d7223acddec31494707056",
+      "outputSha256": "c51ad163eb1a16d20d88773abdeab90aea1e7c5543d7223acddec31494707056",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/quota/index.js",
       "output": "quota/index.js",
-      "bytes": 326,
-      "sourceSha256": "8c8423f5601dea749ccb45c3143143a1a7e71a6281088650756f29eebff5bfe6",
-      "outputSha256": "8c8423f5601dea749ccb45c3143143a1a7e71a6281088650756f29eebff5bfe6",
+      "bytes": 463,
+      "sourceSha256": "05814a130847a52cbcbc9a1a67cad43c807abe179b1ac0a83b0b3c3f6b2fd4b7",
+      "outputSha256": "05814a130847a52cbcbc9a1a67cad43c807abe179b1ac0a83b0b3c3f6b2fd4b7",
       "transform": "verbatim"
     },
     {

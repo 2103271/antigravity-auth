@@ -14,7 +14,9 @@
 import {
   ANTIGRAVITY_MENU_COMMAND,
   type AntigravityMenuAccounts,
+  type AntigravityMenuSections,
   type AntigravityRepositoryMenuOptions,
+  antigravitySettingsSections,
   type CommonAuthCommandsModule,
   createAntigravityCommandMenu,
   loadCommonAuthCommands,
@@ -419,4 +421,25 @@ export function createCustodyAwareRequestPath<S>(options: {
       options.local.dispose()
     },
   }
+}
+
+/** The same command dispatcher over vault sections, without a local repository or sign-in flow. */
+export async function createOpenCodeVaultAntigravityMenu(
+  options: Pick<
+    Parameters<typeof createOpenCodeAntigravityMenu>[0],
+    'settings' | 'dump' | 'applyLogLevel' | 'commands' | 'vault'
+  > & {
+    readonly sections: Pick<AntigravityMenuSections, 'accounts' | 'quota'>
+  },
+): Promise<ReturnType<typeof createAntigravityCommandMenu>> {
+  return createAntigravityCommandMenu({
+    source: 'sections',
+    commands: options.commands ?? (await loadCommonAuthCommands()),
+    sections: {
+      ...options.sections,
+      ...antigravitySettingsSections(operatorMenuSettings(options.settings)),
+    },
+    diagnostics: diagnosticsMenuSection(options),
+    extras: options.vault ? [options.vault] : [],
+  })
 }

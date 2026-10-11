@@ -22,13 +22,23 @@ function account(
     health: 87.6,
     current: true,
     quota: {
-      gemini: { remainingPercent: 72, resetAt: NOW + 90 * 60_000 },
+      gemini: {
+        remainingPercent: 72,
+        checkedAt: NOW,
+        resetAt: NOW + 90 * 60_000,
+      },
       'non-gemini': {
         remainingPercent: 8,
         windows: [
-          { window: '5h', remainingPercent: 40, resetAt: NOW + 30 * 60_000 },
+          {
+            window: '5h',
+            remainingPercent: 40,
+            checkedAt: NOW,
+            resetAt: NOW + 30 * 60_000,
+          },
           {
             window: 'weekly',
+            checkedAt: NOW,
             remainingPercent: 8,
             resetAt: NOW + 3 * 86_400_000,
           },
@@ -46,9 +56,27 @@ describe('projectAccount', () => {
     expect(projected.status).toBe('active')
     expect(projected.statusTone).toBe('ok')
     expect(projected.quota).toEqual([
-      { label: 'Gm', remaining: 72, tone: 'ok', reset: '1h30m' },
-      { label: 'NG 5h', remaining: 40, tone: 'ok', reset: '30m' },
-      { label: 'NG wk', remaining: 8, tone: 'err', reset: '3d' },
+      {
+        label: 'Gm',
+        remaining: 72,
+        figure: '72% left',
+        tone: 'ok',
+        reset: 'resets 2h',
+      },
+      {
+        label: 'NG 5h',
+        remaining: 40,
+        figure: '40% left',
+        tone: 'ok',
+        reset: 'resets 30m',
+      },
+      {
+        label: 'NG 7d',
+        remaining: 8,
+        figure: '8% left',
+        tone: 'err',
+        reset: 'resets 3d',
+      },
     ])
     expect(projected.health).toBe('health 88')
   })
@@ -56,8 +84,20 @@ describe('projectAccount', () => {
   it('shows a missing reading as unknown, not as empty or full', () => {
     const projected = projectAccount(account({ quota: {} }), NOW)
     expect(projected.quota).toEqual([
-      { label: 'Gm', remaining: null, tone: 'muted', reset: '' },
-      { label: 'NG', remaining: null, tone: 'muted', reset: '' },
+      {
+        label: 'Gm',
+        remaining: null,
+        figure: 'no quota reading yet',
+        tone: 'muted',
+        reset: '',
+      },
+      {
+        label: 'NG',
+        remaining: null,
+        figure: 'no quota reading yet',
+        tone: 'muted',
+        reset: '',
+      },
     ])
   })
 
@@ -83,7 +123,10 @@ describe('projectAccount', () => {
 
   it('clamps out-of-range percentages', () => {
     const projected = projectAccount(
-      account({ health: 140, quota: { gemini: { remainingPercent: -5 } } }),
+      account({
+        health: 140,
+        quota: { gemini: { remainingPercent: -5, checkedAt: NOW } },
+      }),
       NOW,
     )
     expect(projected.health).toBe('health 100')
@@ -160,12 +203,14 @@ describe('formatting helpers', () => {
 })
 
 describe('sidebar-projection module graph', () => {
-  it('imports nothing, so neither host build can reach credentials through it', () => {
+  it('imports only the pure quota presentation seam without dynamic code loading', () => {
     const source = readFileSync(
       new URL('./sidebar-projection.ts', import.meta.url),
       'utf8',
     )
-    expect(source).not.toMatch(/^\s*import\s/m)
+    expect(source.match(/^import .*$/gm)).toEqual([
+      "import { quotaReadingParts } from './quota-presentation'",
+    ])
     expect(source).not.toMatch(/\brequire\(|\bimport\(/)
   })
 })

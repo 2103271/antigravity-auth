@@ -42,6 +42,11 @@ export interface AccountMenuOptions {
     extraActions?: readonly MenuAction[];
     /** Recorded on a row the menu disables; defaults to `MENU_DISABLE_REASON`. */
     disableReason?: string;
+    /**
+     * The current time, used to count down to each quota reset and to tell
+     * how old a quota reading is; defaults to `Date.now`.
+     */
+    now?: () => number;
 }
 /**
  * Whether the store holds any usable credential. Meant as one half of an
@@ -49,8 +54,12 @@ export interface AccountMenuOptions {
  * no credential does not count, since it gives the menu nothing to manage.
  */
 export declare function poolHasCredential(store: PoolStore): Promise<boolean>;
-/** Formats a row's stored quota map as one line per window. */
-export declare function quotaLines(row: PoolRow): string[];
+/**
+ * Formats a row's stored quota map as one line per window, in the shared
+ * quota wording (`5h 58% left, resets 2h`; see `formatQuota` in `/quota`).
+ * `now` is the current time in ms and defaults to the clock.
+ */
+export declare function quotaLines(row: PoolRow, now?: number): string[];
 /** Adds an account through the plugin's login and reports what the store did. */
 export declare function addAccountAction(options: AccountMenuOptions): MenuAction;
 /**

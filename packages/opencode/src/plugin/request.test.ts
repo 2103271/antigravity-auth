@@ -1117,6 +1117,8 @@ describe('request.ts', () => {
             'x-session-affinity': 'session-child',
             'X-Session-Id': 'session-child',
             'x-parent-session-id': 'session-parent',
+            'x-opencode-session-id': 'session-child',
+            'x-opencode-parent-session-id': 'session-parent',
           },
         },
         mockAccessToken,
@@ -1138,6 +1140,8 @@ describe('request.ts', () => {
       expect(headers.get('x-session-affinity')).toBeNull()
       expect(headers.get('x-session-id')).toBeNull()
       expect(headers.get('x-parent-session-id')).toBeNull()
+      expect(headers.get('x-opencode-session-id')).toBeNull()
+      expect(headers.get('x-opencode-parent-session-id')).toBeNull()
 
       const wrapped = JSON.parse(result.init.body as string)
       expect(wrapped.requestId).toBe(

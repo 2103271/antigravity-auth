@@ -50,7 +50,7 @@ function success(
 function createLifecycle(): PluginLifecycle {
   return {
     getAccountManager: () => null,
-    replaceAccountRuntime: mock(async () => {}),
+    replaceAccountRuntime: mock(async () => true),
     register: mock(() => {}),
     dispose: mock(async () => {}),
   }
@@ -437,16 +437,16 @@ describe('createOAuthMethods persistence failure handling', () => {
 // The login menu's verification and re-authentication run against the
 // released common-auth store and fs entries embedded in the core package
 // through `loadCommonAuthStoreModules`. Check source-output.json and every
-// payload against the released 0.12.0 archive first. Each private config
+// payload against the released 0.14.1 archive first. Each private config
 // directory has a genuinely initialized store, so login checks the completed
 // initialization record rather than substituting an admission result.
 // ---------------------------------------------------------------------------
 
 const RELEASED_COMMON_AUTH = {
   package: '@cortexkit/common-auth',
-  version: '0.12.0',
+  version: '0.14.1',
   tarballSha256:
-    '35ce4c601c94e8aba94762fade7895047b3038b70c0d93753aa4d955bb04e951',
+    '544304bbcc287aa93cb2a94938e20c80e07509ebbcafbc6b784a3893187868fb',
 } as const
 
 async function embeddedFilesBelow(

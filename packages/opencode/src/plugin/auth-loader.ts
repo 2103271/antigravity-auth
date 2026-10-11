@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto'
 import {
   type AccountManager as CoreAccountManager,
   createAccountRepositoryFactory,
+  type EnrollmentAuthority,
   getHealthTracker,
   loadCommonAuthStoreModules,
+  VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
 import {
   buildSidebarMachineStateFromAccounts,
@@ -182,21 +184,27 @@ function usesPoolFile(opening: AccountStoreOpening): boolean {
 }
 
 interface CreateAuthLoaderOptions {
+  publishSidebar?: () => Promise<void>
   client: PluginClient
   providerId: string
   config: AntigravityConfig
   lifecycle: PluginLifecycle
   createFetch: CreateAuthFetch
+  readAuthority?: () => Promise<EnrollmentAuthority>
+  createVaultFetch?: () => Promise<AuthFetchRuntime>
   onGetAuth?(getAuth: GetAuth): void
   dependencies?: Partial<AuthLoaderDependencies>
 }
 
 export function createAuthLoader({
+  publishSidebar,
   client,
   providerId,
   config,
   lifecycle,
   createFetch,
+  readAuthority,
+  createVaultFetch,
   onGetAuth,
   dependencies,
 }: CreateAuthLoaderOptions): LoadAndInstallRuntime & AuthLoaderHandle {
@@ -245,10 +253,13 @@ export function createAuthLoader({
     storeOpening = null
     return openStore()
   }
+  let closed = false
   let fetchRuntime: AuthFetchRuntime | null = null
+  let vaultFetchRuntime: Promise<AuthFetchRuntime> | null = null
+  let currentRequestSource: EnrollmentAuthority | undefined
+  let latestGetAuth: GetAuth | undefined
   // Reload chain — `installRuntime` swaps the fetch runtime and
-  // (previously) discarded the previous runtime's dispose with `void`,
-  // so two overlapping reloads could interleave teardown. Serialize
+  // overlapping reloads must not interleave teardown. Serialize
   // reloads through a single shared promise so each new install waits
   // for the previous one to fully settle (including its dispose)
   // before tearing down the runtime it depends on.
@@ -257,9 +268,13 @@ export function createAuthLoader({
   lifecycle.register(
     {
       async dispose() {
+        closed = true
+        await reloadChain
         const runtime = fetchRuntime
         fetchRuntime = null
         await runtime?.dispose()
+        await (await vaultFetchRuntime?.catch(() => null))?.dispose()
+        vaultFetchRuntime = null
       },
     },
     'producer',
@@ -276,6 +291,11 @@ export function createAuthLoader({
     getAuth: GetAuth,
     source: 'pool-file' | 'store',
   ): Promise<void> => {
+    if (closed) {
+      await accountManager.dispose()
+      throw new Error('The account loader is disposed')
+    }
+    currentRequestSource = 'local'
     if (accountManager.getAccountCount() > 0) {
       accountManager.requestSaveToDisk()
     }
@@ -290,6 +310,9 @@ export function createAuthLoader({
     // RowRef, and the host client is never used.
     let refreshQueue: ProactiveRefreshQueue | null = null
     const queueConfig = {
+      ...(readAuthority && {
+        mayRun: async () => (await readAuthority()) === 'local',
+      }),
       enabled: config.proactive_token_refresh,
       bufferSeconds: config.proactive_refresh_buffer_seconds,
       checkIntervalSeconds: config.proactive_refresh_check_interval_seconds,
@@ -320,7 +343,11 @@ export function createAuthLoader({
       }
     }
 
-    await lifecycle.replaceAccountRuntime(accountManager, refreshQueue)
+    if (
+      !(await lifecycle.replaceAccountRuntime(accountManager, refreshQueue))
+    ) {
+      throw new Error('The account loader is disposed')
+    }
     refreshQueue?.start()
 
     // Swap the fetch runtime FIRST so the host's captured fetch
@@ -348,46 +375,53 @@ export function createAuthLoader({
     // Push the freshly materialized account pool into the sidebar so the
     // TUI's next poll renders the labels / health / cooldown it needs
     // without waiting for the first fetch to complete.
-    await setSidebarMachineState(
-      buildSidebarMachineStateFromAccounts(
-        accountManager.getAccounts().map((entry) => {
-          const activeByFamily = accountManager.getActiveIndexByFamily()
-          return {
-            index: entry.index,
-            label: entry.label,
-            enabled: entry.enabled,
-            current: isAccountCurrent(entry.index, activeByFamily),
-            coolingDownUntil: entry.coolingDownUntil,
-            healthScore: getHealthTracker().getScore(entry.index),
-            cachedQuota: entry.cachedQuota,
-            // Stamp the sidebar snapshot so the projection can detect a
-            // stale cache that landed on the wrong account (the manager's
-            // `cachedQuotaAccountId` is keyed to whatever account actually
-            // produced the snapshot — the live refresh-token hash is the
-            // expected identity at this slot).
-            cachedQuotaAccountId: entry.cachedQuotaAccountId,
-            currentQuotaAccountId: refreshTokenIdentity(
-              entry.parts.refreshToken,
-            ),
-            tier: toCapturedTier(entry),
-          }
-        }),
-      ),
-    )
+    if (publishSidebar) await publishSidebar()
+    else
+      await setSidebarMachineState(
+        buildSidebarMachineStateFromAccounts(
+          accountManager.getAccounts().map((entry) => {
+            const activeByFamily = accountManager.getActiveIndexByFamily()
+            return {
+              index: entry.index,
+              label: entry.label,
+              enabled: entry.enabled,
+              current: isAccountCurrent(entry.index, activeByFamily),
+              coolingDownUntil: entry.coolingDownUntil,
+              healthScore: getHealthTracker().getScore(entry.index),
+              cachedQuota: entry.cachedQuota,
+              cachedQuotaUpdatedAt: entry.cachedQuotaUpdatedAt,
+              // Stamp the sidebar snapshot so the projection can detect a
+              // stale cache that landed on the wrong account (the manager's
+              // `cachedQuotaAccountId` is keyed to whatever account actually
+              // produced the snapshot — the live refresh-token hash is the
+              // expected identity at this slot).
+              cachedQuotaAccountId: entry.cachedQuotaAccountId,
+              currentQuotaAccountId: refreshTokenIdentity(
+                entry.parts.refreshToken,
+              ),
+              tier: toCapturedTier(entry),
+            }
+          }),
+        ),
+      )
   }
 
   async function runLoader(
     getAuth: GetAuth,
     provider: Provider,
   ): Promise<LoaderResult | Record<string, unknown>> {
+    if (closed) throw new Error('The account loader is disposed')
     onGetAuth?.(getAuth)
+    latestGetAuth = getAuth
+    const authority = (await readAuthority?.()) ?? 'local'
+    if (authority !== 'local') return finishLoad(provider)
     let auth = await getAuth()
 
     const opening = await openStore()
     if (opening.status === 'ready') {
       // This plugin's account pool now comes only from the store's
       // repository; the retired pool file is never read or cleared here.
-      if (!isOAuthAuth(auth)) {
+      if (!isOAuthAuth(auth) && !readAuthority) {
         log.warn(
           'The host holds no Antigravity sign-in; the account store is left untouched',
         )
@@ -510,13 +544,42 @@ export function createAuthLoader({
       // through the OLD interceptor after an OAuth add. The wrapper
       // matches the host's `LoaderResult.fetch` signature exactly
       // (no `this` binding) so behavior is preserved.
-      fetch: (input, init) => fetchRuntime!.fetch(input, init),
+      fetch: async (input, init) => {
+        if (closed) throw new Error('The account loader is disposed')
+        const authority = (await readAuthority?.()) ?? 'local'
+        if (authority === 'unreadable') throw new Error(VAULT_ACCOUNT_REMEDY)
+        if (authority === 'vault') {
+          currentRequestSource = 'vault'
+          if (!createVaultFetch) throw new Error(VAULT_ACCOUNT_REMEDY)
+          vaultFetchRuntime ??= createVaultFetch().catch((error) => {
+            vaultFetchRuntime = null
+            throw error
+          })
+          return (await vaultFetchRuntime).fetch(input, init)
+        }
+        if (
+          readAuthority &&
+          (currentRequestSource !== 'local' || !fetchRuntime)
+        ) {
+          if (!latestGetAuth)
+            throw new Error('The host sign-in reader is unavailable')
+          await reload(latestGetAuth)
+          if (closed) throw new Error('The account loader is disposed')
+          if ((await readAuthority()) !== 'local')
+            throw new Error(VAULT_ACCOUNT_REMEDY)
+        }
+        if (currentRequestSource !== 'local' || !fetchRuntime)
+          throw new Error('The local account runtime is unavailable')
+        return fetchRuntime.fetch(input, init)
+      },
     }
   }
 
   reloadRuntime = async (getAuth: GetAuth): Promise<void> => {
+    if (closed) throw new Error('The account loader is disposed')
+    if (((await readAuthority?.()) ?? 'local') !== 'local') return
     const auth = await getAuth()
-    if (!isOAuthAuth(auth)) return
+    if (!isOAuthAuth(auth) && !readAuthority) return
     const opening = await openStore()
     if (opening.status === 'ready') {
       const nextManager = await loadAccountManagerFromRepository(
@@ -525,7 +588,7 @@ export function createAuthLoader({
       await installRuntime(nextManager, getAuth, 'store')
       return
     }
-    if (!usesPoolFile(opening)) return
+    if (!usesPoolFile(opening) || !isOAuthAuth(auth)) return
     const nextManager = await deps.loadAccountManager(auth)
     await installRuntime(nextManager, getAuth, 'pool-file')
   }

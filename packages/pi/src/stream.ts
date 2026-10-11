@@ -218,7 +218,7 @@ export function updateUsage(
     usage.promptTokenCount ?? output.usage.input + output.usage.cacheRead
   output.usage.input = Math.max(0, promptTotal - cacheRead)
   // candidatesTokenCount excludes thinking; thoughtsTokenCount is billed as
-  // output too. totalTokenCount = prompt + candidates + thoughts (MITM-verified).
+  // output too. totalTokenCount = prompt + candidates + thoughts.
   if (
     usage.candidatesTokenCount !== undefined ||
     usage.thoughtsTokenCount !== undefined
@@ -287,9 +287,9 @@ function getRequestSessionKey(
   if (options?.sessionId) {
     return options.sessionId
   }
-  // Pi 0.86+ gives the leading system message timestamp 0 in every
-  // conversation. Using it as the fallback key would mix session metadata,
-  // so derive the key from the first non-system message instead.
+  // Pi 0.86+ gives every leading system message timestamp 0. A session key
+  // based on that value would make unrelated conversations share one request-
+  // metadata entry. Use the first non-system message's timestamp instead.
   const firstTimestamp = context.messages.find(
     (message) => message.role !== 'system',
   )?.timestamp
@@ -340,31 +340,33 @@ export function resolvePiAntigravityModel(
   return resolveModelForHeaderStyle(`${baseModel}-${tier}`, 'antigravity')
 }
 
-async function sendAntigravityRequest(options: {
+/** A request body built once per logical request, before any credential is chosen. */
+interface PreparedAntigravityRequest {
+  readonly wireModel: string
+  readonly requestId: string
+  readonly request: Record<string, unknown>
+}
+
+/**
+ * The bearer and Antigravity project for one physical send. Both must come
+ * from the same source: the local login, or one vault receipt.
+ */
+export interface AntigravitySendCredential {
+  readonly accessToken: string
+  readonly projectId: string
+}
+
+function prepareAntigravityRequest(options: {
   model: Model<Api>
   context: Context
   streamOptions?: SimpleStreamOptions
-  accessToken: string
   sessionKey: string
-  signal?: AbortSignal
-}): Promise<Response> {
+}): PreparedAntigravityRequest {
   const resolved = resolvePiAntigravityModel(
     options.model,
     options.streamOptions?.reasoning,
   )
   const wireModel = resolved.actualModel
-
-  // Recover the packed refresh (refreshToken|projectId|managedProjectId) that
-  // login/refresh resolved; pi only hands the stream the bare access token.
-  // With it, ensureProjectContext returns the cached managedProjectId directly
-  // instead of re-running loadCodeAssist every turn.
-  const packedRefresh = getPackedRefresh(options.accessToken) ?? ''
-  const projectContext = await ensureProjectContext({
-    type: 'oauth',
-    refresh: packedRefresh,
-    access: options.accessToken,
-    expires: Date.now() + 60_000,
-  })
 
   const request = buildGeminiRequest(options.context, {
     provider: options.model.provider,
@@ -399,12 +401,20 @@ async function sendAntigravityRequest(options: {
     wireModel,
     requestScope,
   )
+  return { wireModel, requestId, request }
+}
 
+/** One physical send of a prepared request with one credential. */
+function dispatchAntigravityRequest(
+  prepared: PreparedAntigravityRequest,
+  credential: AntigravitySendCredential,
+  signal: AbortSignal | null,
+): Promise<Response> {
   const envelope = {
-    project: projectContext.effectiveProjectId,
-    requestId,
-    request,
-    model: wireModel,
+    project: credential.projectId,
+    requestId: prepared.requestId,
+    request: prepared.request,
+    model: prepared.wireModel,
     userAgent: 'antigravity',
     requestType: 'agent',
   }
@@ -416,21 +426,137 @@ async function sendAntigravityRequest(options: {
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${options.accessToken}`,
+        Authorization: `Bearer ${credential.accessToken}`,
         'Content-Type': 'application/json',
         'User-Agent': buildAntigravityHarnessUserAgent(),
         'Accept-Encoding': 'gzip',
       },
       body: JSON.stringify(envelope),
     },
-    { signal: options.signal ?? options.streamOptions?.signal ?? null },
+    { signal },
   )
 }
+
+/** Local mode only; custody sends never reach this path. */
+async function sendAntigravityRequest(options: {
+  model: Model<Api>
+  context: Context
+  streamOptions?: SimpleStreamOptions
+  accessToken: string
+  sessionKey: string
+  signal?: AbortSignal
+}): Promise<Response> {
+  // Pi passes only the access token; the packed refresh
+  // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
+  // the managed project without a loadCodeAssist call per turn.
+  const packedRefresh = getPackedRefresh(options.accessToken) ?? ''
+  const projectContext = await ensureProjectContext({
+    type: 'oauth',
+    refresh: packedRefresh,
+    access: options.accessToken,
+    expires: Date.now() + 60_000,
+  })
+
+  const prepared = prepareAntigravityRequest(options)
+  return dispatchAntigravityRequest(
+    prepared,
+    {
+      accessToken: options.accessToken,
+      projectId: projectContext.effectiveProjectId,
+    },
+    options.signal ?? options.streamOptions?.signal ?? null,
+  )
+}
+
+/**
+ * Vault (custody) mode: sends a prepared request through the vault. `send`
+ * must call `dispatch` once per physical send, each time with the token and
+ * project of a fresh vault receipt, and returns the response that was
+ * finally served.
+ */
+export type AntigravityVaultSend = (
+  dispatch: (
+    credential: AntigravitySendCredential,
+    signal?: AbortSignal,
+  ) => Promise<Response>,
+  signal: AbortSignal,
+) => Promise<Response>
+
+type OpenAntigravityResponse = (
+  sessionKey: string,
+  signal: AbortSignal,
+) => Promise<Response>
 
 export function streamCortexKitAntigravity(
   model: Model<Api>,
   context: Context,
   options?: SimpleStreamOptions,
+  assertAdmission?: () => Promise<void>,
+): AssistantMessageEventStream {
+  return runAntigravityStream(
+    model,
+    context,
+    options,
+    async (sessionKey, signal) => {
+      await assertAdmission?.()
+      const accessToken = options?.apiKey ?? ''
+      if (!accessToken)
+        throw new Error('Missing Antigravity OAuth access token')
+      return sendAntigravityRequest({
+        model,
+        context,
+        streamOptions: options,
+        accessToken,
+        sessionKey,
+        signal,
+      })
+    },
+  )
+}
+
+/**
+ * In vault mode, Pi's Google auth slot contains a fixed API-key marker,
+ * not a real credential. Refuse any other resolved key so a stale local
+ * login cannot enter this stream. Each physical request obtains its bearer
+ * and project from the vault; local credentials and project caches are unused.
+ */
+export function createCortexKitAntigravityVaultStream(
+  send: AntigravityVaultSend,
+  placeholderKey: string,
+) {
+  return (
+    model: Model<Api>,
+    context: Context,
+    options?: SimpleStreamOptions,
+  ): AssistantMessageEventStream =>
+    runAntigravityStream(model, context, options, (sessionKey, signal) => {
+      if (options?.apiKey !== placeholderKey)
+        throw new Error(
+          'The native Google credential slot is not synchronized for vault mode. No request was sent.',
+        )
+      const prepared = prepareAntigravityRequest({
+        model,
+        context,
+        streamOptions: options,
+        sessionKey,
+      })
+      return send(
+        (credential, sendSignal) =>
+          dispatchAntigravityRequest(
+            prepared,
+            credential,
+            sendSignal ?? signal,
+          ),
+        signal,
+      )
+    })
+}
+
+function runAntigravityStream(
+  model: Model<Api>,
+  context: Context,
+  options: SimpleStreamOptions | undefined,
+  open: OpenAntigravityResponse,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream()
 
@@ -442,23 +568,12 @@ export function streamCortexKitAntigravity(
     let chunkIterator: AsyncIterator<GeminiStreamChunk> | undefined
 
     try {
-      const accessToken = options?.apiKey ?? ''
-      if (!accessToken)
-        throw new Error('Missing Antigravity OAuth access token')
-
       const sessionKey = getRequestSessionKey(context, options)
       requestAbort = new AbortController()
       const requestSignal = options?.signal
         ? AbortSignal.any([options.signal, requestAbort.signal])
         : requestAbort.signal
-      response = await sendAntigravityRequest({
-        model,
-        context,
-        streamOptions: options,
-        accessToken,
-        sessionKey,
-        signal: requestSignal,
-      })
+      response = await open(sessionKey, requestSignal)
 
       if (!response.ok) {
         throw new Error(

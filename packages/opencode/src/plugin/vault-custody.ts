@@ -27,11 +27,14 @@ import {
   type CommonAuthClaustrumModule,
   type CommonAuthCommandsModule,
   createAntigravityVaultAccountSource,
+  type EnrollmentAuthority,
+  enrollmentAuthority,
   getAntigravityVaultEnrollmentName,
   loadCommonAuthClaustrum,
   loadCommonAuthFs,
   readVaultProviderState,
   resolveClaustrumConnectionPath,
+  VAULT_ACCOUNT_REMEDY,
   type VaultLogger,
   type VaultProviderStateFile,
   type VaultReporterSource,
@@ -187,10 +190,12 @@ export interface OpenCodeVaultStatus {
   readonly modeProblem?: string
   readonly enrollment: EnrollmentStatus
   /** `unreadable` when the host's slot reader failed. */
-  readonly hostSlot: HostSlotContent | 'unreadable'
+  readonly hostSlot: HostSlotContent | 'unreadable' | 'not-used'
 }
 
 export interface OpenCodeVaultCustodyOptions {
+  readonly onAuthorityChanged?: (authority: EnrollmentAuthority) => void
+  readonly onRosterChanged?: () => void
   /** The resolved account file the vault directory sits beside. */
   readonly accountFile: string
   /**
@@ -217,6 +222,8 @@ export interface OpenCodeVaultCustodyOptions {
 }
 
 export interface OpenCodeVaultCustody {
+  /** Detect approval and disconnect with the existing enrollment-status poll, without another timer. Local mode opens no vault connection. */
+  startObservation(): Promise<void>
   readonly paths: OpenCodeVaultPaths
   readMode(): Promise<OpenCodeVaultModeRead>
   /**
@@ -273,32 +280,8 @@ export function createOpenCodeVaultCustody(
       )
   }
 
-  /** Refuses custody unless the host slot reads and holds no real login. */
-  const assertCustodySlot = async (): Promise<void> => {
-    const claustrum = await loadClaustrum()
-    let slot: unknown
-    try {
-      slot = await options.readHostSlot()
-    } catch {
-      throw new OpenCodeVaultCustodyError(
-        'OpenCode\u2019s own sign-in for Google could not be read, so the vault cannot be used.',
-      )
-    }
-    try {
-      claustrum.assertHostSlotMatchesMode({
-        mode: 'custody',
-        auth: slot,
-        provider: OPENCODE_VAULT_PROVIDER,
-      })
-    } catch {
-      throw new OpenCodeVaultCustodyError(
-        'OpenCode is signed in to Google with its own login. Remove that login before serving accounts from the vault.',
-      )
-    }
-  }
-
   const requireCustodyMode = async (): Promise<void> => {
-    const mode = await readOpenCodeVaultMode(paths.modeFile)
+    const mode = await custody.readMode()
     if (!mode.ok)
       throw new OpenCodeVaultCustodyError(
         `The vault mode is unclear (${mode.reason}). Choose a mode in the Vault section of the Antigravity menu.`,
@@ -317,63 +300,96 @@ export function createOpenCodeVaultCustody(
     current?.close()
   }
 
+  let observedAuthority: EnrollmentAuthority | undefined
+  let observing = false
+  let closed = false
+  const ensureSource = async (): Promise<AntigravityVaultAccountSource> => {
+    if (closed) throw new OpenCodeVaultCustodyError('Vault custody is disposed')
+    if (source) return source
+    creating ??= (async () => {
+      const claustrum = await loadClaustrum()
+      const { tokenPath } = await enrollmentPaths()
+      const created = createAntigravityVaultAccountSource({
+        claustrum,
+        host: OPENCODE_VAULT_HOST,
+        rosterPath: paths.rosterFile,
+        tokenPath,
+        connect:
+          options.connect ??
+          (async () =>
+            claustrum.connectClaustrumScopedClient({
+              connectionFile: await connectionFile(),
+            })),
+        isCustodyActive: async () => {
+          const mode = await custody.readMode()
+          const authority = !mode.ok
+            ? 'unreadable'
+            : mode.record.mode === 'custody'
+              ? 'vault'
+              : 'local'
+          if (authority !== observedAuthority) {
+            observedAuthority = authority
+            options.onAuthorityChanged?.(authority)
+          }
+          if (authority !== 'vault') return false
+          return (await readEnrollment()).state === 'approved'
+        },
+        onRoster: () => options.onRosterChanged?.(),
+        onError: () => options.onRosterChanged?.(),
+        reporterSource: options.reporterSource,
+        state: { path: paths.stateFile, fs: await loadCommonAuthFs() },
+        ...(options.logger ? { logger: options.logger } : {}),
+        ...(options.now ? { now: options.now } : {}),
+      })
+      source = created
+      created.start()
+      return created
+    })()
+    try {
+      return await creating
+    } catch (error) {
+      creating = null
+      throw error
+    }
+  }
+
   const custody: OpenCodeVaultCustody = {
     paths,
-    readMode: () => readOpenCodeVaultMode(paths.modeFile),
-
-    async custodySource() {
-      await requireCustodyMode()
-      await assertCustodySlot()
-      if (source) return source
-      creating ??= (async () => {
-        const claustrum = await loadClaustrum()
-        const { tokenPath } = await enrollmentPaths()
-        const created = createAntigravityVaultAccountSource({
-          claustrum,
-          host: OPENCODE_VAULT_HOST,
-          hostProvider: OPENCODE_VAULT_PROVIDER,
-          rosterPath: paths.rosterFile,
-          tokenPath,
-          connect:
-            options.connect ??
-            (async () =>
-              claustrum.connectClaustrumScopedClient({
-                connectionFile: await connectionFile(),
-              })),
-          // The vault serves this host only while the mode file says custody
-          // and an approved enrollment token is on disk.
-          isCustodyActive: async () => {
-            const mode = await readOpenCodeVaultMode(paths.modeFile)
-            if (!mode.ok || mode.record.mode !== 'custody') return false
-            return (await readEnrollment()).state === 'approved'
-          },
-          readHostSlot: () => options.readHostSlot(),
-          reporterSource: options.reporterSource,
-          state: { path: paths.stateFile, fs: await loadCommonAuthFs() },
-          ...(options.logger ? { logger: options.logger } : {}),
-          ...(options.now ? { now: options.now } : {}),
-        })
-        created.start()
-        source = created
-        return created
-      })()
-      try {
-        return await creating
-      } catch (error) {
-        creating = null
-        throw error
+    async startObservation() {
+      observing = true
+      await ensureSource()
+    },
+    async readMode() {
+      const authority = await enrollmentAuthority(
+        await enrollmentPaths(),
+        OPENCODE_VAULT_ENROLLMENT_NAME,
+        await loadClaustrum(),
+      )
+      if (authority === 'unreadable')
+        return { ok: false, reason: VAULT_ACCOUNT_REMEDY }
+      return {
+        ok: true,
+        record: authority === 'vault' ? CUSTODY_MODE : LOCAL_MODE,
       }
     },
 
+    async custodySource() {
+      await requireCustodyMode()
+      return ensureSource()
+    },
+
     async status() {
-      const mode = await readOpenCodeVaultMode(paths.modeFile)
+      const mode = await custody.readMode()
       const claustrum = await loadClaustrum()
       let hostSlot: OpenCodeVaultStatus['hostSlot']
       try {
-        hostSlot = claustrum.classifyHostSlot(
-          await options.readHostSlot(),
-          OPENCODE_VAULT_PROVIDER,
-        )
+        hostSlot =
+          !mode.ok || mode.record.mode === 'custody'
+            ? 'not-used'
+            : claustrum.classifyHostSlot(
+                await options.readHostSlot(),
+                OPENCODE_VAULT_PROVIDER,
+              )
       } catch {
         hostSlot = 'unreadable'
       }
@@ -416,15 +432,24 @@ export function createOpenCodeVaultCustody(
         throw new OpenCodeVaultCustodyError(
           'OpenCode is not enrolled with the vault yet. Request access and wait for the operator to approve it first.',
         )
-      await assertCustodySlot()
       await ensureVaultDir(paths.dir)
       await writeJsonAtomic(paths.modeFile, CUSTODY_MODE)
     },
 
     async useLocal() {
+      const claustrum = await loadClaustrum()
+      const disconnected = await claustrum.disconnectClaustrumEnrollment(
+        await enrollmentPaths(),
+        OPENCODE_VAULT_ENROLLMENT_NAME,
+      )
+      if (disconnected === 'busy')
+        throw new OpenCodeVaultCustodyError(
+          'Vault enrollment is busy. Disconnect after the current enrollment operation finishes.',
+        )
+      if (!observing) await closeSource()
       await ensureVaultDir(paths.dir)
       await writeJsonAtomic(paths.modeFile, LOCAL_MODE)
-      await closeSource()
+      if (observing) await source?.refresh()
     },
 
     menuSection() {
@@ -455,7 +480,7 @@ export function createOpenCodeVaultCustody(
           if (status.mode !== 'local')
             actions.push({
               id: 'use-local',
-              label: 'Serve accounts from this computer',
+              label: 'Disconnect vault and restore local accounts',
               run: async () => refusalOr(() => custody.useLocal()),
             })
           return { lines: statusLines(status), actions }
@@ -465,7 +490,10 @@ export function createOpenCodeVaultCustody(
 
     readState: () => readVaultProviderState(paths.stateFile),
 
-    dispose: closeSource,
+    dispose: async () => {
+      closed = true
+      await closeSource()
+    },
   }
   return custody
 }
@@ -514,6 +542,8 @@ function describeHostSlot(slot: OpenCodeVaultStatus['hostSlot']): string {
       return 'empty'
     case 'unreadable':
       return 'could not be read'
+    case 'not-used':
+      return 'not used in vault mode'
   }
 }
 
@@ -528,6 +558,8 @@ export function statusLines(status: OpenCodeVaultStatus): string[] {
           : `unclear (${status.modeProblem ?? 'unknown'})`
     }`,
     `Vault access: ${describeEnrollment(status.enrollment)}`,
-    `OpenCode Google sign-in: ${describeHostSlot(status.hostSlot)}`,
+    ...(status.mode === 'local'
+      ? [`OpenCode Google sign-in: ${describeHostSlot(status.hostSlot)}`]
+      : []),
   ]
 }

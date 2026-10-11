@@ -319,6 +319,44 @@ describe('location runtime', () => {
     expect(b.quotaManager.getBackoffUntil(ACCOUNT)).toBe(0)
   })
 
+  it('refuses new local quota work and suppresses late local snapshots under vault authority', async () => {
+    let local = false
+    let fetched = 0
+    const snapshots = createMemoryQuotaSnapshots()
+    const runtime = await start(
+      options(location('authority', {}), {
+        quotaSnapshots: snapshots,
+        mayRun: async () => local,
+        fetchAccountQuota: async (account, signal) => {
+          fetched++
+          local = false
+          return okQuota(account, signal)
+        },
+      }),
+    )
+    expect(
+      (
+        await runtime.quotaManager.refreshAccount(ACCOUNT, {
+          index: 0,
+          force: true,
+        })
+      ).status,
+    ).toBe('error')
+    expect(fetched).toBe(0)
+    expect(snapshots.latest()).toBeNull()
+    local = true
+    expect(
+      (
+        await runtime.quotaManager.refreshAccount(ACCOUNT, {
+          index: 0,
+          force: true,
+        })
+      ).status,
+    ).toBe('ok')
+    expect(fetched).toBe(1)
+    expect(snapshots.latest()).toBeNull()
+  })
+
   it('disposing one location leaves the other serving', async () => {
     const a = await start(options(location('a', {})))
     const b = await start(options(location('b', {})))
@@ -487,4 +525,62 @@ describe('OpenCode 2 location without a sidebar file', () => {
     await (poller as unknown as { runTick(): Promise<void> }).runTick()
     expect(lockCalls).toBe(0)
   })
+})
+
+it('finishes runtime producer work before closing its account resources and draining snapshots', async () => {
+  const events: string[] = []
+  let finishFetch: () => void = () => {}
+  let signalFetchStarted: () => void = () => {}
+  const started = new Promise<void>((resolve) => {
+    signalFetchStarted = resolve
+  })
+  const held = new Promise<void>((resolve) => {
+    finishFetch = resolve
+  })
+  const directory = location('account-resource-order', {
+    background_quota_refresh: false,
+    proactive_token_refresh: false,
+  })
+  const runtime = await createLocationRuntime(
+    options(directory, {
+      fetchAccountQuota: async (account, signal) => {
+        signalFetchStarted()
+        await held
+        events.push('fetch-finished')
+        return okQuota(account, signal)
+      },
+      quotaSnapshots: {
+        ...createMemoryQuotaSnapshots(),
+        drain: async () => {
+          events.push('snapshot-drained')
+        },
+      },
+    }),
+    {
+      dispose: async () => {
+        events.push('accounts-closed')
+      },
+    },
+  )
+  runtimes.push(runtime)
+  const refresh = runtime.quotaManager.refreshAccount(ACCOUNT, {
+    force: true,
+    index: 0,
+  })
+  try {
+    await started
+    const disposal = runtime.dispose()
+    await Promise.resolve()
+    expect(events).not.toContain('accounts-closed')
+    finishFetch()
+    await Promise.all([refresh, disposal])
+    expect(events).toEqual([
+      'fetch-finished',
+      'accounts-closed',
+      'snapshot-drained',
+    ])
+  } finally {
+    finishFetch()
+    await runtime.dispose()
+  }
 })

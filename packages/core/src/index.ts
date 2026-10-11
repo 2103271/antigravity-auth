@@ -33,10 +33,16 @@ export * from './model-registry.ts'
 export * from './model-types.ts'
 export * from './project.ts'
 export * from './quota-manager.ts'
+export {
+  antigravityQuotaTextParts,
+  formatAntigravityQuota,
+  projectAntigravityQuota,
+} from './quota-presentation.ts'
 export * from './quota-types.ts'
 export * from './rotation.ts'
 export * from './transform/index.ts'
 export * from './vault-account-source.ts'
+export * from './vault-enrollment-authority.ts'
 export * from './vault-family.ts'
 export * from './vault-provider-state.ts'
 export * from './version.ts'

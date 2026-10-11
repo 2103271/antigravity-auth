@@ -35,7 +35,7 @@ const sorted = (values: Iterable<string>) => [...new Set(values)].sort()
 
 async function archive() {
   const bytes = await readFile(join(root, inputPath))
-  expect(bytes.length).toBe(235492)
+  expect(bytes.length).toBe(249741)
   expect(digest(bytes)).toBe(publication.sha256)
   const entries = readVerifiedArchive(bytes, publication)
   validatePublication(entries)
@@ -130,19 +130,22 @@ test('producer.public_roots_and_exact_closure', async () => {
   const graph = reach(entries, starts)
   expect(graph.files).toEqual(selected)
   expect(graph.externals).toEqual(closure.nonlocalStaticImports)
-  expect(graph.files.length).toBe(137)
+  expect(graph.files.length).toBe(155)
   expect(
     graph.files.reduce(
       (sum, file) => sum + entries.get(`package/dist/${file}`)!.length,
       0,
     ),
-  ).toBe(698557)
+  ).toBe(818572)
   expect(graph.files.filter((file) => file.startsWith('routing/'))).toEqual(
     closure.routingFiles,
   )
-  expect(
-    graph.files.some((file) => /^(?:opencode2|tui-build)\//.test(file)),
-  ).toBe(false)
+  expect(graph.files.filter((file) => file.startsWith('opencode2/'))).toEqual(
+    publication.files
+      .map(([file]) => String(file))
+      .filter((file) => file.startsWith('opencode2/')),
+  )
+  expect(graph.files.some((file) => file.startsWith('tui-build/'))).toBe(false)
   expect(reach(entries, ['commands/index.js']).files).toContain('store/pool.js')
 })
 
@@ -206,11 +209,11 @@ test('producer.verbatim_map', async () => {
   const map = JSON.parse(
     await readFile(join(target, outputPath, 'source-output.json'), 'utf8'),
   )
-  expect(map.version).toBe('0.12.0')
+  expect(map.version).toBe('0.14.1')
   expect(map.artifactStatus).toBe('released')
   expect(map.publicRoots).toEqual(publication.publicRoots)
-  expect(map.canonicalFiles).toBe(137)
-  expect(map.canonicalBytes).toBe(698557)
+  expect(map.canonicalFiles).toBe(155)
+  expect(map.canonicalBytes).toBe(818572)
   expect(map.tarballSha256).toBe(publication.sha256)
   expect(map.sri).toBe(publication.sri)
   expect(map.transforms).toEqual([])
@@ -282,9 +285,9 @@ test('producer.shared_core_profile_exact_closure', async () => {
       'utf8',
     ),
   )
-  expect(required.length).toBe(121)
-  expect(map.canonicalFiles).toBe(121)
-  expect(map.canonicalBytes).toBe(648870)
+  expect(required.length).toBe(128)
+  expect(map.canonicalFiles).toBe(128)
+  expect(map.canonicalBytes).toBe(692323)
   expect(map.publicRoots).toEqual(profile.publicRoots)
   expect(map.tarballSha256).toBe(publication.sha256)
   expect(map.files.map((file: { output: string }) => file.output)).toEqual(
@@ -296,7 +299,9 @@ test('producer.shared_core_profile_exact_closure', async () => {
         entries.get(`package/dist/${file}`)!,
       ),
     ).toBe(true)
-  expect(required.some((file) => /^(?:rpc|tui)\//.test(file))).toBe(false)
+  expect(required.some((file) => /^(?:rpc|tui|opencode2)\//.test(file))).toBe(
+    false,
+  )
   expect(
     (await readFile(join(target, profile.outputPath, 'NOTICE.txt'))).equals(
       entries.get('package/LICENSE')!,

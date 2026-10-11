@@ -164,6 +164,8 @@ export function createSidebarFileSnapshotStore(
 }
 
 export interface BackgroundQuotaRefreshOptions {
+  publishSidebar?: () => Promise<void>
+  mayRun?: () => Promise<boolean>
   intervalMs: number
   /**
    * The sidebar state file (OpenCode 1). One of `sidebarStateFile` and
@@ -240,9 +242,13 @@ export class BackgroundQuotaRefresh {
   /** Resolves when the currently-running tick completes (or immediately if none). */
   private inFlight: Promise<void> | null = null
   private disposed = false
+  private readonly mayRun?: () => Promise<boolean>
+  private readonly publishSidebar?: () => Promise<void>
 
   constructor(options: BackgroundQuotaRefreshOptions) {
     this.intervalMs = options.intervalMs
+    this.mayRun = options.mayRun
+    this.publishSidebar = options.publishSidebar
     if (options.snapshots) {
       this.snapshots = options.snapshots
     } else if (typeof options.sidebarStateFile === 'string') {
@@ -319,6 +325,11 @@ export class BackgroundQuotaRefresh {
   }
 
   private async runTick(): Promise<void> {
+    if (this.mayRun && !(await this.mayRun())) {
+      if (!this.disposed) this.scheduleNext(this.jitteredInterval())
+      return
+    }
+    if (this.disposed) return
     // ── 1. Quota freshness gate ──────────────────────────────────────────
     //
     // Bound: `max(intervalMs − 60_000, floor(intervalMs / 2))`.
@@ -363,6 +374,7 @@ export class BackgroundQuotaRefresh {
     }
 
     try {
+      if (this.disposed || (this.mayRun && !(await this.mayRun()))) return
       if (ageMs >= freshnessThresholdMs) await this.refresh()
       else await this.refreshTierSlot()
     } finally {
@@ -378,12 +390,13 @@ export class BackgroundQuotaRefresh {
 
   private async refresh(): Promise<void> {
     const refreshedQuota = await this.refreshQuota()
-    await this.refreshTierSlot()
+    if (!this.disposed && (!this.mayRun || (await this.mayRun())))
+      await this.refreshTierSlot()
     if (refreshedQuota) await this.pushSnapshot()
   }
 
   private async refreshQuota(): Promise<boolean> {
-    if (this.disposed) return false
+    if (this.disposed || (this.mayRun && !(await this.mayRun()))) return false
 
     const manager = this.getAccountManager()
     if (!manager) return false
@@ -517,6 +530,10 @@ export class BackgroundQuotaRefresh {
   }
 
   private async pushSnapshot(): Promise<void> {
+    if (this.publishSidebar) {
+      await this.publishSidebar()
+      return
+    }
     // ONE snapshot write per poll. `pushSidebarQuotaSnapshot` reads the live
     // account view (with the just-updated cached values) and writes it to
     // the same store whose `checkedAt` the freshness check reads, so each
@@ -537,10 +554,9 @@ export class BackgroundQuotaRefresh {
           coolingDownUntil: entry.coolingDownUntil,
           cachedQuota: entry.cachedQuota,
           cachedQuotaAccountId: entry.cachedQuotaAccountId,
-          // Derive current identity from the LIVE refresh token, independent
-          // of whatever stamp the cached snapshot carries. Mirrors index.ts's
-          // two correct call sites so the sidebar can detect a stale snapshot
-          // after an account reorder.
+          // An account reorder changes which cached reading occupies an index.
+          // Use a refresh-token-derived account ID to detect that mismatch
+          // before showing quota in the sidebar.
           currentQuotaAccountId: quotaAccountIdentity(entry.parts.refreshToken),
           tier: toCapturedTier(entry),
         }))

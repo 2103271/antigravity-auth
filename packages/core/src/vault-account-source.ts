@@ -7,9 +7,9 @@
  * - receipt: what Claustrum serves for one send attempt: a fresh bearer, the
  *   Antigravity project for the model request, the account identity the vault
  *   asserted, and the record version it served for the credential.
- * - host auth slot: the credential record the host itself stores for this
- *   provider (OpenCode's or Pi's own login entry). Under custody it holds a
- *   placeholder, never a real login.
+ * - host auth slot: the host's own Google credential record. Pi temporarily
+ *   replaces it with a non-secret marker and retains a backup; OpenCode may
+ *   keep its existing login. Neither is read by this vault account source.
  *
  * The host passes in the library's public `./claustrum` module; every library
  * type here is taken from that module's own declarations.
@@ -22,8 +22,8 @@
  * - Google bearers are opaque: a receipt is accepted only when the vault
  *   asserted the credential and the account the selected route names. No
  *   token is parsed for an identity, and API-key credentials are refused.
- * - Nothing is served unless custody is active and the host's auth slot holds
- *   no real login. The host reads its own slot; this module never touches it.
+ * - Nothing is served unless custody is active. The host's local credentials
+ *   stay dormant: this source never reads or refreshes them.
  */
 
 import type { CommonAuthClaustrumModule } from './common-auth-runtime.ts'
@@ -84,10 +84,7 @@ export type VaultClaustrumConsumer = Pick<
 export interface VaultClaustrumPort
   extends Pick<
     CommonAuthClaustrumModule,
-    | 'assertHostSlotMatchesMode'
-    | 'decideScopedRetryAfter401'
-    | 'isDeclined'
-    | 'mutateVaultRoster'
+    'decideScopedRetryAfter401' | 'isDeclined' | 'mutateVaultRoster'
   > {
   ClaustrumConsumer: new (
     options: VaultConsumerOptions,
@@ -169,21 +166,11 @@ export interface VaultSendOptions {
 export interface AntigravityVaultSourceOptions {
   claustrum: VaultClaustrumPort
   host: AntigravityVaultHost
-  /**
-   * Provider id the host stores its credential record under: `google`
-   * in both OpenCode and Pi.
-   */
-  hostProvider: string
   rosterPath: string
   /** Enrollment token file that setup wrote for this host (`host`). */
   tokenPath: string
   connect: () => Promise<VaultScopedClient>
   isCustodyActive: () => boolean | Promise<boolean>
-  /**
-   * The host's stored credential record for `hostProvider`, read through the
-   * host's own API. Checked before every admission and state commit.
-   */
-  readHostSlot: () => unknown | Promise<unknown>
   /**
    * How a 401 reached this plugin, passed to Claustrum with the 401 report
    * that `send` makes.
@@ -431,10 +418,7 @@ export function createAntigravityVaultAccountSource(
     signal?.throwIfAborted()
   }
 
-  /**
-   * Custody must be on and the host's stored credential record must not be a
-   * real login.
-   */
+  /** Require approved vault access before obtaining credentials for an operation. */
   const assertServing = async (signal?: AbortSignal) => {
     assertOpen(signal)
     if (!(await options.isCustodyActive()))
@@ -442,11 +426,6 @@ export function createAntigravityVaultAccountSource(
         'not-active',
         'Antigravity vault custody is not active for this host',
       )
-    claustrum.assertHostSlotMatchesMode({
-      mode: 'custody',
-      auth: await options.readHostSlot(),
-      provider: options.hostProvider,
-    })
     assertOpen(signal)
   }
 

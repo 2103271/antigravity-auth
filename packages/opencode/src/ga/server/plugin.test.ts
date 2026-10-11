@@ -1120,25 +1120,30 @@ describe('setup against a host context', () => {
     ).toBeUndefined()
   })
 
-  it('createGaAntigravityPlugin runs the real services factory, which refuses an uninitialized location', async () => {
+  it('registers the real services for an uninitialized location without opening its local store', async () => {
     prepareRoot()
     const log: string[] = []
     const directory = locationDirectory('uninitialized')
     const plugin = server.createGaAntigravityPlugin()
     // The production setup accepts the full host context type; the fake
     // host provides only the parts setup uses, through the same function.
-    await expect(
-      server.setupGaActivation(
-        fakeHost(directory, log),
-        createGaLocationServices,
-      ),
-    ).rejects.toThrow('not initialized')
+    const cleanup = await server.setupGaActivation(
+      fakeHost(directory, log),
+      createGaLocationServices,
+    )
     expect(typeof plugin.setup).toBe('function')
-    // Nothing was registered with the host and no store was created.
-    expect(log).toEqual([])
-    expect(
-      readdirSync(directory, { recursive: true }).map((entry) => String(entry)),
-    ).toEqual(['.opencode', join('.opencode', 'antigravity.json')])
+    if (!cleanup) throw new Error('the native host received no cleanup')
+    try {
+      expect(log.length).toBeGreaterThan(0)
+      expect(
+        readdirSync(directory, { recursive: true }).map((entry) =>
+          String(entry),
+        ),
+      ).toEqual(['.opencode', join('.opencode', 'antigravity.json')])
+    } finally {
+      await cleanup()
+    }
+    expect(log).toContain('dispose rpc antigravity-auth')
   })
 
   it('one location’s Cleanup leaves another location’s registrations in place', async () => {

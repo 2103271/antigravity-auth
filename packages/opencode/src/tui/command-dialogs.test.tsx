@@ -238,7 +238,7 @@ describe('openAntigravityMenu', () => {
     expect(shown[1]).toEqual({
       kind: 'select',
       title: 'Accounts',
-      options: ['2 accounts', 'Account 1', 'Add account', 'Back'],
+      options: ['Account 1', 'Add account', 'Back'],
     })
     expect(requests).toEqual([])
   })
@@ -285,7 +285,7 @@ describe('openAntigravityMenu', () => {
     expect(last).toEqual({
       kind: 'select',
       title: 'Limits',
-      options: ['Killswitch: on · floor 25%', 'Killswitch', 'Back'],
+      options: ['Killswitch', 'Back'],
     })
   })
 
@@ -377,7 +377,7 @@ describe('openAntigravityMenu', () => {
     expect(shown.at(-1)).toEqual({
       kind: 'select',
       title: 'Accounts',
-      options: ['2 accounts', 'Add account', 'Back'],
+      options: ['Add account', 'Back'],
     })
   })
 
@@ -475,6 +475,80 @@ describe('drawer option builders', () => {
       value: 'section:diagnostics',
       description: 'Logging: info',
     })
+  })
+
+  it('renders explanations and read-only quota items as headers while account status uses the footer', () => {
+    const section = menu().sections[0]
+    if (!section) throw new Error('Accounts fixture missing')
+    const actionable = section.items[0]
+    if (!actionable) throw new Error('Account fixture missing')
+    const options = sectionOptions({
+      ...section,
+      lines: [
+        'Accounts are managed in the vault. Disconnect to use local accounts.',
+      ],
+      items: [
+        {
+          id: 'quota-summary',
+          label: 'Vault account 1',
+          group: 'Quota',
+          status: 'Gemini Flash 80% left',
+          actions: [],
+        },
+        { ...actionable, group: 'Vault accounts', status: '80% left' },
+      ],
+    })
+    expect(options.map((option) => option.value)).toEqual([
+      'item:sel-7f3a',
+      'action:add',
+      'back',
+    ])
+    expect(options[0]?.category).toContain('Accounts are managed in the vault')
+    expect(options[0]?.category).toContain(
+      'Vault account 1 · Gemini Flash 80% left',
+    )
+    expect(options[0]?.category).toContain('Vault accounts')
+    expect(options[0]?.footer).toBe('80% left')
+    expect(options[0]?.description).toBe('enabled · current')
+    expect(options.some((option) => option.value.startsWith('line:'))).toBe(
+      false,
+    )
+    expect(
+      itemOptions(actionable).some((option) =>
+        option.value.startsWith('line:'),
+      ),
+    ).toBe(false)
+    expect(
+      parseMenuDialogPayload({
+        ...payload(),
+        menu: {
+          ...menu(),
+          sections: [
+            {
+              ...section,
+              items: [
+                { ...actionable, group: 'Vault accounts', status: '80% left' },
+              ],
+            },
+          ],
+        },
+      }).ok,
+    ).toBe(true)
+  })
+
+  it('preserves a non-selectable explanation on Back when a section has no actions', () => {
+    const section = menu().sections[0]
+    if (!section) throw new Error('Accounts fixture missing')
+    expect(
+      sectionOptions({
+        ...section,
+        lines: ['No quota reading yet.'],
+        items: [],
+        actions: [],
+      }),
+    ).toEqual([
+      { title: 'Back', value: 'back', category: 'No quota reading yet.' },
+    ])
   })
 
   it('sectionOptions and itemOptions never carry a hide property', () => {
