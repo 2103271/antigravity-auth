@@ -1,7 +1,7 @@
 import { expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -73,32 +73,29 @@ interface Receipt {
   leader: number
   leaderStart: string
   descendant: number
+  ppid: number
   start: string
   group: number
+  leaderGroup: number
   sid: number
   root: string
 }
 
-for (const [keepPipes, failInspection] of [
-  [true, false],
-  [false, false],
-  [false, true],
+for (const [keepPipes, failInspection, separateGroup] of [
+  [true, false, false],
+  [false, false, false],
+  [false, true, false],
+  [false, false, true],
 ] as const) {
   it(
     failInspection
       ? 'retains the fixture and primary failure when controlled live descendant cleanup cannot be confirmed'
-      : `reaps controlled live descendants that outlive the leader with ${keepPipes ? 'retained' : 'closed'} pipes`,
+      : separateGroup
+        ? 'reaps a captured same-session descendant in a separate process group after leader exit'
+        : `reaps controlled live descendants that outlive the leader with ${keepPipes ? 'retained' : 'closed'} pipes`,
     async () => {
-      const paired =
-        process.env.PUBLIC_COMMAND_OBSERVATION_DIAGNOSTIC === '1' &&
-        !failInspection
-      for (const periodic of paired
-        ? [true, false, false, true]
-        : [undefined]) {
-        const diagnostic =
-          periodic === undefined
-            ? undefined
-            : createPublicCommandDiagnostic(periodic)
+      {
+        const diagnostic = createPublicCommandDiagnostic(true)
         const witness = await realpath(
           await mkdtemp(
             join(await realpath(tmpdir()), 'agy-wrapper-descendant-'),
@@ -106,23 +103,35 @@ for (const [keepPipes, failInspection] of [
         )
         const nonce = randomUUID()
         const receiptPath = join(witness, 'receipt.json')
+        const capturedPath = join(witness, 'captured')
+        const readyPath = join(witness, 'group-ready')
         const leader = join(witness, 'leader.mjs')
         await writeFile(
           leader,
           `
       import { spawn } from 'node:child_process'
-      import { writeFileSync } from 'node:fs'
+      import { existsSync, writeFileSync } from 'node:fs'
       import { dirname } from 'node:path'
       import { createPublicCommandInspector } from ${JSON.stringify(pathToFileURL(join(import.meta.dir, 'public-command-processes.test.ts')).href)}
-      const descendant = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 2500); setInterval(() => {}, 100)', '${nonce}'], {
+      const descendant = spawn(${separateGroup ? "'python3'" : 'process.execPath'}, ${separateGroup ? JSON.stringify(['-c', `import os, time; os.setpgid(0, 0); open(${JSON.stringify(readyPath)}, 'w').close(); time.sleep(2.5)`, nonce]) : `['-e', 'setTimeout(() => process.exit(0), 2500); setInterval(() => {}, 100)', '${nonce}']`}, {
         stdio: ${keepPipes ? "'inherit'" : "'ignore'"}, env: process.env,
       })
       descendant.unref()
+      ${separateGroup ? `while (!existsSync(${JSON.stringify(readyPath)})) await Bun.sleep(5)` : ''}
       const inspector = await createPublicCommandInspector()
       const own = inspector.read(process.pid), member = inspector.read(descendant.pid)
       if (!own || !member) throw new Error('controlled live process identity unavailable')
-      writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({ nonce: '${nonce}', leader: own.pid, leaderStart: own.start.toString(), descendant: member.pid, start: member.start.toString(), group: own.pgid, sid: own.sid, root: dirname(process.env.HOME) }))
+      writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({ nonce: '${nonce}', leader: own.pid, leaderStart: own.start.toString(), descendant: member.pid, ppid: member.ppid, start: member.start.toString(), group: member.pgid, leaderGroup: own.pgid, sid: member.sid, root: dirname(process.env.HOME) }))
       inspector.close()
+      ${
+        failInspection
+          ? ''
+          : `const deadline = performance.now() + 2000
+      while (!existsSync(${JSON.stringify(capturedPath)})) {
+        if (performance.now() >= deadline) throw new Error('native ancestry capture acknowledgment unavailable')
+        await Bun.sleep(5)
+      }`
+      }
       process.exit(${failInspection ? 7 : 0})
     `,
         )
@@ -134,7 +143,9 @@ for (const [keepPipes, failInspection] of [
           try {
             result = await runPublicConsumerCommand(
               [process.execPath, leader],
-              BOUNDS,
+              failInspection
+                ? BOUNDS
+                : { ...BOUNDS, executionMs: PUBLIC_COMMAND_BOUNDS.executionMs },
               failInspection
                 ? async () => {
                     const actual = await createPublicCommandInspector()
@@ -146,7 +157,41 @@ for (const [keepPipes, failInspection] of [
                       close: () => actual.close(),
                     }
                   }
-                : createPublicCommandInspector,
+                : async () => {
+                    const actual = await createPublicCommandInspector()
+                    return {
+                      read: actual.read,
+                      session(sid) {
+                        const rows = actual.session(sid)
+                        const calls = diagnostic.calls
+                        // The monitor records success only after real ancestry
+                        // admission returns. A raw SID row is not an admission.
+                        queueMicrotask(() => {
+                          const sample = diagnostic.samples.at(-1)
+                          if (
+                            diagnostic.calls <= calls ||
+                            sample?.error !== null ||
+                            !sample.activeMembers ||
+                            !existsSync(receiptPath)
+                          )
+                            return
+                          const born: Receipt = JSON.parse(
+                            readFileSync(receiptPath, 'utf8'),
+                          )
+                          if (
+                            rows.some(
+                              (row) =>
+                                row.pid === born.descendant &&
+                                row.start === BigInt(born.start),
+                            )
+                          )
+                            writeFileSync(capturedPath, 'captured')
+                        })
+                        return rows
+                      },
+                      close: () => actual.close(),
+                    }
+                  },
               diagnostic,
             )
           } catch (error) {
@@ -163,6 +208,13 @@ for (const [keepPipes, failInspection] of [
             receipt.group,
           )
           const rootExists = existsSync(receipt.root)
+          if (!failInspection) expect(existsSync(capturedPath)).toBe(true)
+          if (separateGroup) {
+            expect(receipt.ppid).toBe(receipt.leader)
+            expect(receipt.group).toBe(receipt.descendant)
+            expect(receipt.group).not.toBe(receipt.leaderGroup)
+            expect(receipt.sid).toBe(receipt.leader)
+          }
           console.log(
             JSON.stringify({
               cleanupProbe: failInspection
@@ -214,21 +266,25 @@ for (const [keepPipes, failInspection] of [
               const own: PublicCommandIdentity = {
                 pid: receipt.leader,
                 ppid: process.pid,
-                pgid: receipt.group,
+                pgid: receipt.leaderGroup,
                 sid: receipt.sid,
                 start: BigInt(receipt.leaderStart),
                 zombie: false,
               }
               const member: PublicCommandIdentity = {
                 pid: receipt.descendant,
-                ppid: receipt.leader,
+                ppid: receipt.ppid,
                 pgid: receipt.group,
                 sid: receipt.sid,
                 start: BigInt(receipt.start),
                 zombie: false,
               }
               signalPublicCommandMember(
-                { leader: own, observed: new Map(), signals: [] },
+                {
+                  leader: own,
+                  observed: new Map([[member.pid, member]]),
+                  signals: [],
+                },
                 member,
                 actual,
                 'SIGKILL',

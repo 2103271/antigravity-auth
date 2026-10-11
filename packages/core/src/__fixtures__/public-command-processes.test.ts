@@ -24,6 +24,7 @@ export interface PublicCommandInspector {
 
 export interface PublicCommandScope {
   leader: PublicCommandIdentity
+  // Entries have verified parent/birth ancestry, not merely a matching SID.
   observed: Map<number, PublicCommandIdentity>
   signals: {
     pid: number
@@ -303,7 +304,8 @@ export function assertPublicCommandIdentity(
     throw new Error('owned process PID birth identity changed')
   if (
     current.sid !== leader.sid ||
-    current.pgid !== leader.pgid ||
+    current.sid !== expected.sid ||
+    current.pgid !== expected.pgid ||
     current.start < leader.start
   )
     throw new Error(
@@ -315,12 +317,53 @@ export function assertPublicCommandIdentity(
     )
 }
 
+function capturePublicCommandAncestry(
+  scope: PublicCommandScope,
+  member: PublicCommandIdentity,
+  inspector: PublicCommandInspector,
+): void {
+  const chain: PublicCommandIdentity[] = []
+  const seen = new Set<number>()
+  let cursor = member
+  for (;;) {
+    if (seen.has(cursor.pid) || seen.size >= MAX_PROCESSES)
+      throw new Error('owned process ancestry cycle or bound exceeded')
+    seen.add(cursor.pid)
+    const captured =
+      cursor.pid === scope.leader.pid
+        ? scope.leader
+        : scope.observed.get(cursor.pid)
+    if (captured) {
+      assertPublicCommandIdentity(captured, cursor, scope.leader)
+      break
+    }
+    assertPublicCommandIdentity(cursor, cursor, scope.leader)
+    chain.push(cursor)
+    const parent = inspector.read(cursor.ppid)
+    if (!parent || parent.zombie || cursor.start < parent.start)
+      throw new Error('owned process parent/birth ancestry unavailable')
+    cursor = parent
+  }
+  // SID is a discovery boundary, not ownership proof. Capture only a fresh
+  // parent/birth chain to the leader or an already verified descendant.
+  for (const expected of [...chain, cursor]) {
+    const current = inspector.read(expected.pid)
+    if (!current || current.zombie)
+      throw new Error('owned process parent/birth ancestry unavailable')
+    assertPublicCommandIdentity(expected, current, scope.leader)
+    if (expected !== cursor && current.ppid !== expected.ppid)
+      throw new Error('owned process parent/birth ancestry changed')
+  }
+  for (const captured of chain) scope.observed.set(captured.pid, captured)
+}
+
 export function inspectPublicCommandScope(
   scope: PublicCommandScope,
   inspector: PublicCommandInspector,
 ): PublicCommandIdentity[] {
-  // Check current session members and identities already observed by this job.
-  // A child that leaves the session before observation is outside this check.
+  // Keep captured descendants independent of their parents' lifetime. An
+  // unseen orphan cannot be admitted from SID alone; fail closed instead.
+  // Session sampling cannot discover a child that leaves before first capture.
   const currentLeader = inspector.read(scope.leader.pid)
   if (currentLeader)
     assertPublicCommandIdentity(scope.leader, currentLeader, scope.leader)
@@ -331,12 +374,10 @@ export function inspectPublicCommandScope(
   }
   const members = inspector.session(scope.leader.sid)
   for (const member of members) {
-    assertPublicCommandIdentity(
-      scope.observed.get(member.pid) ?? member,
-      member,
-      scope.leader,
-    )
-    scope.observed.set(member.pid, member)
+    const captured = scope.observed.get(member.pid)
+    if (captured) assertPublicCommandIdentity(captured, member, scope.leader)
+    else if (!member.zombie)
+      capturePublicCommandAncestry(scope, member, inspector)
   }
   return members.filter((member) => !member.zombie)
 }
@@ -350,6 +391,9 @@ export function signalPublicCommandMember(
 ): void {
   const leader = inspector.read(scope.leader.pid)
   if (leader) assertPublicCommandIdentity(scope.leader, leader, scope.leader)
+  const captured = scope.observed.get(expected.pid)
+  if (!captured) throw new Error('owned process was not captured before signal')
+  assertPublicCommandIdentity(captured, expected, scope.leader)
   const current = inspector.read(expected.pid)
   if (!current) return
   assertPublicCommandIdentity(expected, current, scope.leader)
