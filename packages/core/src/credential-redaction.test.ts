@@ -299,6 +299,73 @@ describe('credential redaction', () => {
       expect(text).not.toContain(jwt)
     }
   })
+  for (const [name, frame] of [
+    [
+      'escaped error key',
+      String.raw`{"\u0065rror":{"message":"${selected}","code":"UNCHANGED"}}`,
+    ],
+    [
+      'escaped nested keys',
+      String.raw`{"respon\u0073e":{"err\u006fr":{"message":"${selected}","code":"UNCHANGED"}}}`,
+    ],
+    [
+      'escaped error type',
+      String.raw`{"type":"\u0065rror","message":"${selected}","code":"UNCHANGED"}`,
+    ],
+    [
+      'escaped credential',
+      String.raw`{"error":{"message":"\u006fpaque-selected-token","code":"UNCHANGED"}}`,
+    ],
+  ] as const) {
+    it(`redacts ${name} in a genuine JSON error frame`, () => {
+      const output = redactCredentialFrame(frame, selected)
+      const parsed = JSON.parse(output)
+      const diagnostic = parsed.error ?? parsed.response?.error ?? parsed
+      expect(diagnostic.message).toBe('[credential]')
+      expect(diagnostic.code).toBe('UNCHANGED')
+      expect(output).not.toContain(selected)
+    })
+  }
+  it('redacts an escaped credential in a failed HTTP JSON body without changing status or retry headers', async () => {
+    const original = new Response(
+      String.raw`{"message":"\u006fpaque-selected-token","code":"UNCHANGED"}`,
+      {
+        status: 403,
+        headers: { 'retry-after': '3' },
+      },
+    )
+    const safe = await redactCredentialResponse(original, selected)
+    expect(safe.status).toBe(403)
+    expect(safe.headers.get('retry-after')).toBe('3')
+    expect(await safe.json()).toEqual({
+      message: '[credential]',
+      code: 'UNCHANGED',
+    })
+  })
+  it('leaves Unicode-escaped error-looking model and tool content byte-identical', () => {
+    const frame = String.raw`{"candidates":[{"content":{"parts":[{"text":"\u006fpaque-selected-token"},{"functionCall":{"args":{"\u0065rror":"${selected}"}}}]}}]}`
+    expect(redactCredentialFrame(frame, selected)).toBe(frame)
+  })
+  it('redacts fragmented SSE with an escaped error key and credential', async () => {
+    const frame = String.raw`{"\u0065rror":{"message":"\u006fpaque-selected-token","code":"UNCHANGED"}}`
+    const bytes = new TextEncoder().encode(`data: ${frame}\r\n\r\n`)
+    const original = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, 18))
+          controller.enqueue(bytes.slice(18))
+          controller.close()
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    )
+    const safe = await redactCredentialResponse(original, selected)
+    const output = await safe.text()
+    expect(JSON.parse(output.slice('data: '.length).trim())).toEqual({
+      error: { message: '[credential]', code: 'UNCHANGED' },
+    })
+    expect(original.body!.locked).toBe(false)
+  })
   it('preserves transformed success bytes, response metadata and cancellation reason', async () => {
     const bytes = `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: `π ${detail} {"error":"${selected}"}` }] } }] })}\r\n\r\n`
     const original = new Response(bytes, {

@@ -124,16 +124,34 @@ export function redactCredentialError(
   return safe
 }
 
+function redactDiagnosticText(
+  text: string,
+  credentials?: Credentials,
+  parsed?: unknown,
+): string {
+  const direct = redactCredentialText(text, credentials)
+  if (direct !== text || !text.includes('\\u')) return direct
+  try {
+    // JSON escapes can hide a credential even after the diagnostic is recognized.
+    const canonical = JSON.stringify(parsed ?? JSON.parse(text))
+    const safe = redactCredentialText(canonical, credentials)
+    return safe === canonical ? text : safe
+  } catch {
+    return text
+  }
+}
+
 /** Ordinary model text, including text that mentions errors or tokens, is not a diagnostic. */
 export function redactCredentialFrame(
   frame: string,
   credentials?: Credentials,
 ): string {
-  if (!frame.includes('"error"')) return frame
+  if (!frame.includes('"error"') && !frame.includes('\\u')) return frame
   try {
     const value = JSON.parse(frame)
-    if (value?.type === 'error' || value?.error || value?.response?.error)
-      return redactCredentialText(frame, credentials)
+    if (value?.type === 'error' || value?.error || value?.response?.error) {
+      return redactDiagnosticText(frame, credentials, value)
+    }
   } catch {
     // Non-JSON data is not an error envelope.
   }
@@ -183,7 +201,7 @@ export async function redactCredentialResponse(
           })
         : null)
     const redacted =
-      text === null ? null : redactCredentialText(text, credentials)
+      text === null ? null : redactDiagnosticText(text, credentials)
     if (
       (bufferedBody !== undefined || !response.body) &&
       redacted === text &&

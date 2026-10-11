@@ -1220,6 +1220,11 @@ describe('account-store quota service', () => {
        */
       unscopedFlushFailure?: boolean
       mayRun?: () => Promise<boolean>
+      /**
+       * Reports progress while loading modules, initializing and opening the store,
+       * writing logins, and loading the manager to locate a stalled setup operation.
+       */
+      trace?: (phase: string) => void
       ensureProject?: ReturnType<
         typeof createLocalAccountCredentials
       >['ensureProject']
@@ -1228,10 +1233,13 @@ describe('account-store quota service', () => {
       >['assertGrantCurrent']
     } = {},
   ) {
+    options.trace?.('modules-start')
     const modules = await genuineModules()
+    options.trace?.('initialization-start')
     expect((await initializeFreshAccountStoreFor(modules)).status).toBe(
       'completed',
     )
+    options.trace?.('open-start')
     const exchanged: string[] = []
     const opening = await openAccountStore({
       modules,
@@ -1248,10 +1256,12 @@ describe('account-store quota service', () => {
     if (opening.status !== 'ready') throw new Error('store is not ready')
     const repository = opening.repository
     repositories.push(repository)
+    options.trace?.('login-commit-start')
     await commitLogins(repository, [
       login('token-a|project-a', 'a@example.test'),
       login('token-b|project-b', 'b@example.test'),
     ])
+    options.trace?.('login-commit-done')
     await options.seed?.(repository)
     // The manager writes through this view; with `failQuotaWrites` its
     // quota writes fail while every other operation reaches the store.
@@ -1287,10 +1297,12 @@ describe('account-store quota service', () => {
             },
           })
         : repository
+    options.trace?.('manager-load-start')
     const manager = await loadAccountManagerFromRepository(managerRepository, {
       onDiagnostic: () => {},
       ...(options.now !== undefined ? { now: options.now } : {}),
     })
+    options.trace?.('manager-load-done')
     const bearers: Array<string | null> = []
     const service = createStoreQuotaService({
       manager,
@@ -1396,10 +1408,23 @@ describe('account-store quota service', () => {
   })
 
   it('refuses deferred quota project metadata when authority changes during resolution', async () => {
+    const started = performance.now()
+    const trace =
+      process.env.ANTIGRAVITY_QUOTA_PHASE_TRACE === '1'
+        ? (phase: string) =>
+            console.error(
+              JSON.stringify({
+                quotaProjectPhase: phase,
+                elapsedMs: performance.now() - started,
+              }),
+            )
+        : undefined
     let local = true
     const store = await storeService(undefined, {
+      trace,
       mayRun: async () => local,
       ensureProject: async (auth) => {
+        trace?.('project-authority-change')
         local = false
         return {
           auth: { ...auth, refresh: `${auth.refresh}|late-managed-project` },
@@ -1410,15 +1435,21 @@ describe('account-store quota service', () => {
     const update = spyOn(store.manager, 'updateFromAuth')
     try {
       const target = store.manager.getAccountsForQuotaCheck()[0]!
+      trace?.('refresh-start')
       const outcome = await store.service.refreshAccount(target, {
         force: true,
       })
+      trace?.('refresh-done')
       expect(outcome.status).toBe('failed')
       expect(update).not.toHaveBeenCalled()
       expect(store.bearers).toHaveLength(0)
+      trace?.('rows-start')
       expect((await store.rows())[0]?.quota.status).toBe('absent')
+      trace?.('rows-done')
     } finally {
+      trace?.('dispose-start')
       await store.service.dispose()
+      trace?.('dispose-done')
     }
   })
 
