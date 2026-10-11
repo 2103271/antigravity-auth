@@ -61,7 +61,7 @@ echo "→ Running pre-release checks..."
 echo ""
 
 [[ "$(bun --version)" == "1.4.2" ]] || { echo "Error: private TUI compiler requires Bun 1.4.2"; exit 1; }
-test -f tools/common-auth-build/inputs/cortexkit-common-auth-0.9.4.tgz
+bun packages/opencode/scripts/embed-common-auth.ts --check
 bun install --cwd tools/common-auth-build --frozen-lockfile --ignore-scripts
 bun run embed:check
 

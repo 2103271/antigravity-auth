@@ -673,9 +673,17 @@ test('build.prerequisite_order', async () => {
   ]) {
     const code = await readFile(join(repo, path), 'utf8')
     expect(code).toContain('1.4.2')
-    expect(code).toContain(
-      'bun install --cwd tools/common-auth-build --frozen-lockfile --ignore-scripts',
+    const install =
+      'bun install --cwd tools/common-auth-build --frozen-lockfile --ignore-scripts'
+    const archiveCheck =
+      'bun packages/opencode/scripts/embed-common-auth.ts --check'
+    const lines = code.split('\n').map((line) => line.trim())
+    const installs = lines.flatMap((line, index) =>
+      line === install ? [index] : [],
     )
+    expect(installs.length).toBeGreaterThan(0)
+    for (const index of installs) expect(lines[index - 1]).toBe(archiveCheck)
+    expect(code).not.toContain('test -f tools/common-auth-build/inputs/')
     expect(code.indexOf('bun run embed:check')).toBeLessThan(
       code.indexOf('bun run typecheck'),
     )
