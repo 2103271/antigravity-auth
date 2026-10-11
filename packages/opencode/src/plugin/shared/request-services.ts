@@ -31,9 +31,13 @@ import {
   type OAuthAuthDetails,
   type ProjectContextResult,
   parseRateLimitReason,
+  preserveResponseMetadata,
   type QuotaGroup,
   type QuotaGroupSummary,
   type QuotaManager,
+  redactCredentialError,
+  redactCredentialResponse,
+  redactCredentialText,
   resolveQuotaGroup,
   type TokenBucketTracker,
   VAULT_ACCOUNT_REMEDY,
@@ -766,7 +770,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
   const warmupState: WarmupState = createWarmupState()
   const shutdown = new AbortController()
   const inFlight = new Set<Promise<unknown>>()
-  const bufferedOverflow = new WeakSet<Response>()
+  const bufferedOverflow = new WeakMap<Response, string>()
   let retired = false
   let drainPromise: Promise<void> | undefined
   let disposePromise: Promise<void> | undefined
@@ -800,6 +804,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     input: RequestInfo | URL,
     init?: RequestInit,
     options: RequestExecuteOptions = {},
+    selectedCredentials: Set<string> = new Set(),
   ): Promise<Response> {
     const assertAdmission = async (): Promise<void> => {
       init?.signal?.throwIfAborted()
@@ -893,7 +898,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     const debugLines: string[] = []
     const pushDebug = (line: string) => {
       if (!debug.isDebugEnabled()) return
-      debugLines.push(line)
+      debugLines.push(redactCredentialText(line, [...selectedCredentials]))
     }
     pushDebug(`request=${urlString}`)
     if (requestSessionIdentity.sessionId) {
@@ -1339,7 +1344,14 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         if (credentials.domain !== 'local' || !auth.access)
           throw new Error('Local credentials were not resolved')
         await assertAdmission()
-        const context = await credentials.ensureProject(auth)
+        // Project resolution can use this bearer before the main model send.
+        if (auth.access) selectedCredentials.add(auth.access)
+        const context = await credentials
+          .ensureProject(auth)
+          .catch((error: unknown) => {
+            throw redactCredentialError(error, [...selectedCredentials])
+          })
+        await assertAdmission()
         // A project cache may carry an older bearer. Only the token fixed
         // before this await belongs to the newly prepared request.
         const projectAuth: OAuthAuthDetails = {
@@ -1554,6 +1566,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             account: selected,
             signal: abortSignal,
           })
+          selectedCredentials.add(admission.accessToken)
           if (admission.projectId !== preparedProjectId) {
             throw new Error(
               'The vault served another project for this send; skipping it',
@@ -1569,6 +1582,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           )
         }
         await localGrant.captured.check()
+        await assertAdmission()
         return { init: sendInit }
       }
 
@@ -1860,6 +1874,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 'Local credentials were not resolved for the selected account',
               )
             }
+            selectedCredentials.add(sendAccessToken)
             const prepared = prepareAgyWireRequest(wire, {
               input,
               init,
@@ -1944,6 +1959,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 )
               }
               await localGrant.captured.check()
+              await assertAdmission()
             }
 
             pushDebug(
@@ -2509,9 +2525,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                     'Context too long - use /compact to reduce size',
                     'warning',
                   )
-                  // Only the clone was inspected; the host must receive the
-                  // original overflow payload, status, headers and unread body.
-                  bufferedOverflow.add(response)
+                  // Classification reads only a clone. Retain the original
+                  // response unless its buffered diagnostics need secret redaction.
+                  bufferedOverflow.set(response, bodyText)
                   return response
                 }
               }
@@ -2868,28 +2884,45 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           ? [requestedSignal, shutdown.signal]
           : [shutdown.signal],
       )
+      const selectedCredentials = new Set<string>()
       const pending = execute(
         input,
         { ...init, signal: cancellation.signal },
         requestOptions,
-      ).then(
-        async (response) => {
-          // Overflow classification already consumed a clone to wire EOF.
-          // Preserve the original response and leave its buffered body unread.
-          if (bufferedOverflow.has(response)) {
-            cancellation.release()
-            return response
-          }
-          const retained = await retainResponseLifetime(response, cancellation)
-          inFlight.add(retained.settled)
-          void retained.settled.then(() => inFlight.delete(retained.settled))
-          return retained.response
-        },
-        (error: unknown) => {
-          cancellation.release()
-          throw error
-        },
+        selectedCredentials,
       )
+        .then(
+          async (response) => {
+            // Overflow classification read a clone to EOF. Reuse that text
+            // for redaction; safe diagnostics retain the original unread response.
+            if (bufferedOverflow.has(response)) {
+              cancellation.release()
+              return redactCredentialResponse(
+                response,
+                [...selectedCredentials],
+                bufferedOverflow.get(response),
+              )
+            }
+            const retained = await retainResponseLifetime(
+              response,
+              cancellation,
+            )
+            inFlight.add(retained.settled)
+            void retained.settled.then(() => inFlight.delete(retained.settled))
+            return redactCredentialResponse(
+              preserveResponseMetadata(retained.response, response),
+              [...selectedCredentials],
+            )
+          },
+          (error: unknown) => {
+            cancellation.release()
+            throw redactCredentialError(error, [...selectedCredentials])
+          },
+        )
+        .catch((error: unknown) => {
+          cancellation.release()
+          throw redactCredentialError(error, [...selectedCredentials])
+        })
       inFlight.add(pending)
       void pending.then(
         () => inFlight.delete(pending),

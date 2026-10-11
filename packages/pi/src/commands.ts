@@ -174,6 +174,12 @@ export function createPiAntigravityAccountSections(
       title: 'Routing',
       build: async () => {
         const status = await (await options.setup()).status()
+        if (status.mode === 'unreadable')
+          return {
+            lines: [
+              'Vault enrollment authority is unreadable; requests are refused. Recover or Disconnect in the Vault section.',
+            ],
+          }
         if (status.mode !== 'custody')
           return {
             lines: [
