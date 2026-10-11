@@ -80,7 +80,7 @@ The harness-agnostic core ships as `@cortexkit/antigravity-auth-core`. `src/inde
 - **`packages/core/src/auth.ts`** — `parseRefreshParts`, `formatRefreshParts`, `accessTokenExpired` (60s buffer), refresh-token validity.
 - **`packages/core/src/auth-types.ts`** — packed/refresh token wire types.
 - **`packages/core/src/constants.ts`** — endpoints (`ANTIGRAVITY_ENDPOINT_FALLBACKS = [DAILY, PROD]`), scopes, request headers, sentinel values (`SKIP_THOUGHT_SIGNATURE`), `CLAUDE_TOOL_SYSTEM_INSTRUCTION`, OAuth prompt copy.
-- **`packages/core/src/fetch-timeout.ts`** — `fetchWithActiveTimeout` (15s header abort, stream-safe: the abort listener is removed once the body streams).
+- **`packages/core/src/fetch-timeout.ts`** — `fetchWithActiveTimeout` (15s default header deadline, removed when headers resolve; caller cancellation remains attached until body EOF, error or cancellation).
 - **`packages/core/src/file-lock.ts`** — renewable fenced lock for pool/sidebar paths, eviction markers, ownership assertion/loss signals and idempotent release. Pre/post-rename checks detect loss; rename is not compare-and-swap. Repository leases are a separate common-auth capability.
 - **`packages/core/src/fingerprint.ts`** — per-account device fingerprint + fingerprint history persistence helpers.
 - `packages/core/src/logger.ts` — structured logging primitives used by host composition and core modules.
@@ -91,7 +91,7 @@ The harness-agnostic core ships as `@cortexkit/antigravity-auth-core`. `src/inde
 - **`packages/core/src/quota-types.ts`** — quota result shapes (`AccountQuotaResult`).
 - **`packages/core/src/rotation.ts`** — `HealthScoreTracker`, `TokenBucketTracker`, `selectHybridAccount` (the hybrid scoring formula used by `account-manager.getCurrentOrNextForFamily`), `calculateBackoffMs`, `computeSoftQuotaCacheTtlMs`.
 - **`packages/core/src/atomic-write.ts`** — temp-file + `rename` writer (mode `0o600`, no copy fallback); raw `node:fs` only.
-- **`packages/core/src/version.ts`** — exported `VERSION` constant; the build pipeline uses it for cache busting.
+- **`packages/core/src/version.ts`** — resolves the Antigravity client version from its updater API or changelog, with the constants fallback; it is not the npm package-version synchronizer.
 
 - `packages/core/src/vault-enrollment-authority.ts` — selects local or vault accounts from fresh enrollment state and blocks local work while vault access is active or unreadable.
 - `packages/core/src/vault-account-source.ts` — vault account discovery, fresh per-send credentials, and credential-free selection state. It never reads or refreshes the host's local Google login.
