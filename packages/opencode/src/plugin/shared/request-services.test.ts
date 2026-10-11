@@ -15,10 +15,12 @@ import {
   SKIP_THOUGHT_SIGNATURE,
   TokenBucketTracker,
 } from '@cortexkit/antigravity-auth-core'
+import { startGaLoopbackBridge } from '../../ga/server/index'
 import { extractAccountAccessErrorDetails } from '../account-access'
 import { createAuthLoader } from '../auth-loader'
 import { DEFAULT_CONFIG } from '../config'
 import { createLocationDebug } from '../debug'
+import { createGaJobExecutor } from '../ga-location-services'
 import { createGeminiDumpState } from '../gemini-dump'
 import { createPluginLifecycle } from '../lifecycle'
 import { createLocationLogger } from '../logger'
@@ -942,6 +944,349 @@ describe('createRequestExecutor retry contract', () => {
     }
   })
 
+  it('redacts the actual local project-lookup bearer before cancellation returns its terminal failure', async () => {
+    const opaque = 'opaque_project_lookup_748a'
+    const failure = Object.assign(new Error(`project lookup echo ${opaque}`), {
+      code: 'PROJECT_LOOKUP_FAILED',
+    })
+    const caller = new AbortController()
+    const used: string[] = []
+    const h = harness({
+      refresh: async (auth) => ({
+        ...auth,
+        access: opaque,
+        expires: Date.now() + 3_600_000,
+      }),
+      respond: async () => {
+        throw new Error('main send must not run')
+      },
+    })
+    const credentials = h.deps
+      .credentials as LocalRequestCredentials<ManagedAccount>
+    const executor = createRequestExecutor({
+      ...h.deps,
+      credentials: {
+        ...credentials,
+        ensureProject: async (auth) => {
+          used.push(auth.access ?? '')
+          caller.abort(failure)
+          throw failure
+        },
+      },
+    })
+    try {
+      const error = await executor
+        .execute(NON_STREAM_URL, CHAT_INIT(caller.signal))
+        .catch((error: unknown) => error)
+      expect(used).toEqual([opaque])
+      expect(h.calls).toHaveLength(0)
+      expect(error).toBe(failure)
+      expect(failure.code).toBe('PROJECT_LOOKUP_FAILED')
+      expect(failure.message).toBe('project lookup echo [credential]')
+    } finally {
+      await executor.dispose()
+    }
+  })
+
+  it('vetoes project metadata persistence after public source authority changes during resolution', async () => {
+    let local = true
+    const h = harness({ respond: async () => okJson() })
+    const credentials = h.deps
+      .credentials as LocalRequestCredentials<ManagedAccount>
+    const update = mock(credentials.updateFromAuth)
+    const executor = createRequestExecutor({
+      ...h.deps,
+      assertAdmission: async () => {
+        if (!local) throw new Error('authority changed')
+      },
+      credentials: {
+        ...credentials,
+        updateFromAuth: update,
+        ensureProject: async (auth) => {
+          local = false
+          return {
+            auth: { ...auth, refresh: 'new-project-metadata' },
+            effectiveProjectId: 'new-project',
+          }
+        },
+      },
+    })
+    try {
+      await executor.execute(NON_STREAM_URL, CHAT_INIT()).catch(() => {})
+      expect(
+        update.mock.calls.filter(
+          ([, auth]) => auth.refresh === 'new-project-metadata',
+        ),
+      ).toHaveLength(0)
+      expect(h.calls).toHaveLength(0)
+    } finally {
+      await executor.dispose()
+    }
+  })
+
+  it('refuses a physical send after authority changes during the final captured grant await', async () => {
+    let local = true
+    const h = harness({ respond: async () => okJson() })
+    const credentials = h.deps
+      .credentials as LocalRequestCredentials<ManagedAccount>
+    const executor = createRequestExecutor({
+      ...h.deps,
+      assertAdmission: async () => {
+        if (!local) throw new Error('authority changed')
+      },
+      credentials: {
+        ...credentials,
+        captureGrant: () => ({
+          source: 'pool-file',
+          check: async () => {
+            local = false
+          },
+        }),
+      },
+    })
+    try {
+      await executor.execute(NON_STREAM_URL, CHAT_INIT()).catch(() => {})
+      expect(h.calls).toHaveLength(0)
+    } finally {
+      await executor.dispose()
+    }
+  })
+
+  for (const source of ['transport', 'http', 'sse'] as const) {
+    it(`redacts selected credential in composed OpenCode ${source} errors`, async () => {
+      const detail =
+        'echo access-fresh Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+      const failure = Object.assign(new Error(detail), {
+        code: 'ECONNRESET',
+        detail,
+        cause: new Error(detail),
+      })
+      const h = harness({
+        respond: async () => {
+          if (source === 'transport') throw failure
+          return new Response(
+            source === 'http'
+              ? JSON.stringify({
+                  error: {
+                    code: 400,
+                    status: 'INVALID_ARGUMENT',
+                    message: detail,
+                  },
+                })
+              : `data: ${JSON.stringify({ response: { error: { code: 400, message: detail } } })}\n\n`,
+            {
+              status: source === 'http' ? 400 : 200,
+              headers: {
+                'content-type':
+                  source === 'http' ? 'application/json' : 'text/event-stream',
+              },
+            },
+          )
+        },
+      })
+      const executor = createRequestExecutor(h.deps)
+      try {
+        if (source === 'transport') {
+          const error = await executor
+            .execute(STREAM_URL, CHAT_INIT())
+            .catch((error: unknown) => error)
+          expect(error).toBe(failure)
+          expect(failure.code).toBe('ECONNRESET')
+          expect(failure.cause).toBeUndefined()
+          for (const text of [
+            failure.message,
+            failure.stack!,
+            failure.detail,
+          ]) {
+            expect(text).not.toContain('access-fresh')
+            expect(text).not.toContain('another-token')
+            expect(text).not.toContain('eyJ')
+          }
+        } else {
+          const response = await executor.execute(
+            source === 'http' ? NON_STREAM_URL : STREAM_URL,
+            CHAT_INIT(),
+          )
+          expect(response.status).toBe(source === 'http' ? 400 : 200)
+          const text = await response.text()
+          expect(text).not.toContain('access-fresh')
+          expect(text).not.toContain('another-token')
+          expect(text).not.toContain('eyJ')
+          expect(text).toContain('[credential]')
+          expect(text).toContain('400')
+        }
+      } finally {
+        await executor.dispose()
+      }
+    })
+  }
+
+  it('redacts immutable terminal transport errors without losing their retry classification', async () => {
+    const failure = Object.freeze(
+      Object.assign(new Error('echo access-fresh'), {
+        code: 'ECONNRESET',
+        status: 503,
+      }),
+    )
+    const h = harness({
+      respond: async () => {
+        throw failure
+      },
+    })
+    const executor = createRequestExecutor(h.deps)
+    try {
+      const error = await executor
+        .execute(STREAM_URL, CHAT_INIT())
+        .catch((error: unknown) => error)
+      expect(error).not.toBe(failure)
+      expect(error).toMatchObject({
+        message: 'echo [credential]',
+        code: 'ECONNRESET',
+        status: 503,
+      })
+      expect(h.calls).toHaveLength(ANTIGRAVITY_ENDPOINT_FALLBACKS.length)
+    } finally {
+      await executor.dispose()
+    }
+  })
+
+  for (const host of ['v1', 'ga'] as const) {
+    it(`preserves transformed successful ${host} output bytes containing credentials and error-looking text`, async () => {
+      const text =
+        'access-fresh Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature {"error":"access-fresh"}'
+      const h = harness({
+        respond: async () =>
+          new Response(
+            `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } } })}\n\n`,
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      })
+      let transformed: Response | undefined
+      const executor = createRequestExecutor({
+        ...h.deps,
+        wire: {
+          ...WIRE,
+          transformResponse: async (...args) => {
+            const response = await WIRE.transformResponse(...args)
+            transformed = response.clone()
+            return response
+          },
+        },
+      })
+      const bridge =
+        host === 'ga'
+          ? await startGaLoopbackBridge({
+              execute: createGaJobExecutor(executor),
+              send: async () => {
+                throw new Error('unused raw sender')
+              },
+            })
+          : undefined
+      try {
+        const response = bridge
+          ? await fetch(
+              bridge.rewrite(
+                new Request(STREAM_URL, CHAT_INIT()),
+                {
+                  sessionID: 'success-ga',
+                  parentSessionID: null,
+                  kind: 'primary',
+                  modelID: 'gemini-3-flash',
+                  variant: null,
+                  url: STREAM_URL,
+                  body: String(CHAT_INIT().body),
+                },
+                {
+                  HTTP_PROXY: undefined,
+                  HTTPS_PROXY: undefined,
+                  ALL_PROXY: undefined,
+                },
+              ),
+            )
+          : await executor.execute(STREAM_URL, CHAT_INIT())
+        if (!transformed)
+          throw new Error('the host response was not transformed')
+        const [before, after] = await Promise.all([
+          transformed.arrayBuffer(),
+          response.arrayBuffer(),
+        ])
+        expect(new Uint8Array(after)).toEqual(new Uint8Array(before))
+        expect(new TextDecoder().decode(after)).toContain(
+          text.replaceAll('"', '\\"'),
+        )
+        expect(response.status).toBe(transformed.status)
+        expect(h.calls).toHaveLength(1)
+      } finally {
+        await bridge?.dispose()
+        await executor.dispose()
+      }
+    })
+  }
+
+  for (const source of ['transport', 'http', 'sse'] as const) {
+    it(`redacts selected credential through GA host bridge ${source}`, async () => {
+      const detail =
+        'echo access-fresh Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+      const h = harness({
+        respond: async () => {
+          if (source === 'transport') throw new Error(detail)
+          return new Response(
+            source === 'http'
+              ? JSON.stringify({ error: { code: 400, message: detail } })
+              : `data: ${JSON.stringify({ response: { error: { code: 400, message: detail } } })}\n\n`,
+            {
+              status: source === 'http' ? 400 : 200,
+              headers: {
+                'content-type':
+                  source === 'http' ? 'application/json' : 'text/event-stream',
+              },
+            },
+          )
+        },
+      })
+      const executor = createRequestExecutor(h.deps)
+      const bridge = await startGaLoopbackBridge({
+        execute: createGaJobExecutor(executor),
+        send: async () => {
+          throw new Error('unused raw sender')
+        },
+      })
+      try {
+        const url = source === 'http' ? NON_STREAM_URL : STREAM_URL
+        const request = new Request(url, CHAT_INIT())
+        const rewritten = bridge.rewrite(
+          request,
+          {
+            sessionID: 'redaction-ga',
+            parentSessionID: null,
+            kind: 'primary',
+            modelID: 'gemini-3-flash',
+            variant: null,
+            url,
+            body: String(CHAT_INIT().body),
+          },
+          {
+            HTTP_PROXY: undefined,
+            HTTPS_PROXY: undefined,
+            ALL_PROXY: undefined,
+          },
+        )
+        const response = await fetch(rewritten)
+        expect(response.status).toBe(
+          source === 'transport' ? 502 : source === 'http' ? 400 : 200,
+        )
+        const text = await response.text()
+        expect(text).not.toContain('access-fresh')
+        expect(text).not.toContain('another-token')
+        expect(text).not.toContain('eyJ')
+        expect(text).toContain('[credential]')
+      } finally {
+        await bridge.dispose()
+        await executor.dispose()
+      }
+    })
+  }
+
   it('returns the last upstream response when the only account is ineligible', async () => {
     const pool = makePool(1)
     const h = harness({
@@ -986,6 +1331,87 @@ function vaultDeps(
 }
 
 describe('createRequestExecutor vault admissions', () => {
+  it('scrubs distinct auxiliary vault bearers before cache-warmup diagnostics reach the sink', async () => {
+    const mainToken = 'opaque_primary_vault_24a'
+    const auxiliaryToken = 'opaque_auxiliary_vault_95b'
+    let admissions = 0
+    const diagnostics: string[] = []
+    const h = harness({
+      pool: makePool(2),
+      config: {
+        cache_warmup_on_switch: true,
+        switch_on_first_rate_limit: true,
+        max_rate_limit_wait_seconds: 0,
+      },
+      respond: async (call, index) => {
+        const bearer = new Headers(call.init?.headers).get('authorization')
+        if (bearer === `Bearer ${auxiliaryToken}`) {
+          call.options?.onDebug?.(`auxiliary-trace echo ${auxiliaryToken}`)
+          throw new Error(`echo ${auxiliaryToken}`)
+        }
+        expect(bearer).toBe(`Bearer ${mainToken}`)
+        if (index === 0)
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 429,
+                status: 'RESOURCE_EXHAUSTED',
+                message: 'rate limit exceeded',
+              },
+            }),
+            {
+              status: 429,
+              headers: {
+                'retry-after': '3600',
+                'content-type': 'application/json',
+              },
+            },
+          )
+        return okJson()
+      },
+    })
+    const dependencies = vaultDeps(h, async (account) => ({
+      credentialId: `credential-${account.index}`,
+      accountIdentity: `identity-${account.index}`,
+      recordVersion: 1,
+      accessToken: admissions++ === 2 ? auxiliaryToken : mainToken,
+      projectId: 'project-effective',
+      report401: async () => {},
+    }))
+    const executor = createRequestExecutor({
+      ...dependencies,
+      debug: { ...dependencies.debug, isDebugEnabled: () => true },
+      wire: {
+        ...WIRE,
+        transformResponse: async (...args) => {
+          diagnostics.push(...(args[11] ?? []))
+          return WIRE.transformResponse(...args)
+        },
+      },
+    })
+    try {
+      const response = await executor.execute(NON_STREAM_URL, CHAT_INIT())
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe(
+        JSON.stringify({
+          candidates: [{ content: { role: 'model', parts: [{ text: 'hi' }] } }],
+        }),
+      )
+      expect(admissions).toBe(3)
+      expect(h.calls).toHaveLength(3)
+      expect(diagnostics.join('\n')).toContain(
+        'cache-warmup-probe: failed echo [credential]',
+      )
+      expect(diagnostics.join('\n')).toContain(
+        'auxiliary-trace echo [credential]',
+      )
+      expect(diagnostics.join('\n')).not.toContain(auxiliaryToken)
+      expect(diagnostics.join('\n')).not.toContain(mainToken)
+    } finally {
+      await executor.dispose()
+    }
+  })
+
   it('admits every physical send and sends with that admission only', async () => {
     const admitted: number[] = []
     const h = harness({

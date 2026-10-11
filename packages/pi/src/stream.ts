@@ -8,6 +8,8 @@ import {
   fetchWithAgyCliTransport,
   forwardAbort,
   orderAgyRequestPayloadInPlace,
+  redactCredentialError,
+  redactCredentialText,
   resolveModelForHeaderStyle,
 } from '@cortexkit/antigravity-auth-core'
 import {
@@ -446,6 +448,7 @@ async function sendAntigravityRequest(options: {
   accessToken: string
   sessionKey: string
   signal?: AbortSignal
+  assertAdmission?: () => Promise<void>
 }): Promise<Response> {
   // Pi passes only the access token; the packed refresh
   // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
@@ -459,6 +462,7 @@ async function sendAntigravityRequest(options: {
   })
 
   const prepared = prepareAntigravityRequest(options)
+  await options.assertAdmission?.()
   return dispatchAntigravityRequest(
     prepared,
     {
@@ -486,6 +490,7 @@ export type AntigravityVaultSend = (
 type OpenAntigravityResponse = (
   sessionKey: string,
   signal: AbortSignal,
+  selectedCredentials: Set<string>,
 ) => Promise<Response>
 
 export function streamCortexKitAntigravity(
@@ -510,6 +515,7 @@ export function streamCortexKitAntigravity(
         accessToken,
         sessionKey,
         signal,
+        assertAdmission,
       })
     },
   )
@@ -530,27 +536,35 @@ export function createCortexKitAntigravityVaultStream(
     context: Context,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream =>
-    runAntigravityStream(model, context, options, (sessionKey, signal) => {
-      if (options?.apiKey !== placeholderKey)
-        throw new Error(
-          'The native Google credential slot is not synchronized for vault mode. No request was sent.',
-        )
-      const prepared = prepareAntigravityRequest({
-        model,
-        context,
-        streamOptions: options,
-        sessionKey,
-      })
-      return send(
-        (credential, sendSignal) =>
-          dispatchAntigravityRequest(
-            prepared,
-            credential,
-            sendSignal ?? signal,
-          ),
-        signal,
-      )
-    })
+    runAntigravityStream(
+      model,
+      context,
+      options,
+      (sessionKey, signal, selectedCredentials) => {
+        if (options?.apiKey !== placeholderKey)
+          throw new Error(
+            'The native Google credential slot is not synchronized for vault mode. No request was sent.',
+          )
+        const prepared = prepareAntigravityRequest({
+          model,
+          context,
+          streamOptions: options,
+          sessionKey,
+        })
+        return send(async (credential, sendSignal) => {
+          selectedCredentials.add(credential.accessToken)
+          try {
+            return await dispatchAntigravityRequest(
+              prepared,
+              credential,
+              sendSignal ?? signal,
+            )
+          } catch (error) {
+            throw redactCredentialError(error, [...selectedCredentials])
+          }
+        }, signal)
+      },
+    )
 }
 
 function runAntigravityStream(
@@ -563,6 +577,9 @@ function runAntigravityStream(
 
   void (async () => {
     const output = createOutput(model)
+    const selectedCredentials = new Set<string>(
+      options?.apiKey ? [options.apiKey] : [],
+    )
     stream.push({ type: 'start', partial: output })
     let response: Response | undefined
     let requestAbort: AbortController | undefined
@@ -573,7 +590,11 @@ function runAntigravityStream(
       const sessionKey = getRequestSessionKey(context, options)
       requestAbort = new AbortController()
       detachCaller = forwardAbort(options?.signal, requestAbort)
-      response = await open(sessionKey, requestAbort.signal)
+      response = await open(
+        sessionKey,
+        requestAbort.signal,
+        selectedCredentials,
+      )
 
       if (!response.ok) {
         throw new Error(
@@ -796,8 +817,10 @@ function runAntigravityStream(
       await chunkIterator?.return?.(undefined).catch(() => {})
       await response?.body?.cancel().catch(() => {})
       output.stopReason = options?.signal?.aborted ? 'aborted' : 'error'
-      output.errorMessage =
-        error instanceof Error ? error.message : String(error)
+      output.errorMessage = redactCredentialText(
+        error instanceof Error ? error.message : String(error),
+        [...selectedCredentials],
+      )
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()
     } finally {

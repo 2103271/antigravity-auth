@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -23,6 +23,7 @@ import type {
 } from '@earendil-works/pi-coding-agent'
 
 import { registerCortexKitPiAntigravity } from './index.ts'
+import { PiVaultSetup } from './vault-setup.ts'
 
 const TOKEN = 'd'.repeat(64)
 
@@ -209,6 +210,32 @@ async function apply(menu: CommandMenu, sectionId: string, actionId: string) {
     invocation,
   )
 }
+
+it('public unreadable enrollment makes Accounts and Routing refuse local serving and keeps Disconnect reachable', async () => {
+  const claustrum = await loadCommonAuthClaustrum()
+  const setup = new PiVaultSetup({
+    claustrum,
+    stateDir: join(dir, 'vault'),
+    modeFile: join(dir, 'vault', 'pi-mode.json'),
+    readHostSlot: () => hostSlot,
+    connectEnrollment: async () => enrollmentEndpoint(),
+  })
+  await setup.connectStep()
+  await writeFile(setup.paths.statePath, '{broken enrollment')
+  const { menu } = await openPiMenu()
+  const payload = await menu.open(invocation)
+  expect(section(payload, 'accounts').lines.join('\n')).toContain('unreadable')
+  expect(section(payload, 'routing').lines.join('\n')).toContain('refused')
+  expect(section(payload, 'routing').lines.join('\n')).not.toContain(
+    "uses Pi's own login",
+  )
+  expect(
+    section(payload, 'vault').actions.some((action) => action.id === 'forget'),
+  ).toBe(true)
+  const bytes = await readFile(setup.paths.statePath, 'utf8')
+  await expect(setup.useLocal()).rejects.toThrow()
+  expect(await readFile(setup.paths.statePath, 'utf8')).toBe(bytes)
+})
 
 describe('Pi /antigravity menu', () => {
   it('shows the four account slots then the Vault extra, for the local login', async () => {

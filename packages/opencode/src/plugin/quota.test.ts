@@ -1219,6 +1219,13 @@ describe('account-store quota service', () => {
        * without a row ID.
        */
       unscopedFlushFailure?: boolean
+      mayRun?: () => Promise<boolean>
+      ensureProject?: ReturnType<
+        typeof createLocalAccountCredentials
+      >['ensureProject']
+      assertGrantCurrent?: ReturnType<
+        typeof createLocalAccountCredentials
+      >['assertGrantCurrent']
     } = {},
   ) {
     const modules = await genuineModules()
@@ -1289,15 +1296,24 @@ describe('account-store quota service', () => {
       manager,
       repository,
       logger: silent,
-      credentials: createLocalAccountCredentials(manager, {
-        repository: managerRepository,
-        // A fixed project answer, so the check never makes the live project
-        // lookup the local project cache would make.
-        ensureProject: async (auth) => ({
-          auth,
-          effectiveProjectId: 'project-from-cache',
+      mayRun: options.mayRun,
+      credentials: {
+        ...createLocalAccountCredentials(manager, {
+          repository: managerRepository,
+          // A fixed project answer, so the check never makes the live project
+          // lookup the local project cache would make.
+          ensureProject: async (auth) => ({
+            auth,
+            effectiveProjectId: 'project-from-cache',
+          }),
         }),
-      }),
+        ...(options.ensureProject
+          ? { ensureProject: options.ensureProject }
+          : {}),
+        ...(options.assertGrantCurrent
+          ? { assertGrantCurrent: options.assertGrantCurrent }
+          : {}),
+      },
       transport: () => async (url, init) => {
         const bearer = new Headers(init.headers).get('authorization')
         bearers.push(bearer)
@@ -1308,7 +1324,14 @@ describe('account-store quota service', () => {
               groups: [
                 {
                   displayName: 'Gemini',
-                  buckets: [{ remainingFraction: 0.25, window: 'WEEKLY' }],
+                  buckets: [
+                    {
+                      bucketId: 'gemini-weekly',
+                      remainingFraction: 0.25,
+                      window: 'weekly',
+                      resetTime: '2030-01-01T00:00:00Z',
+                    },
+                  ],
                 },
               ],
             }),
@@ -1343,6 +1366,79 @@ describe('account-store quota service', () => {
     const [rowA, rowB] = await store.rows()
     expect(rowB?.quota.status).toBe('present')
     expect(rowA?.quota.status).toBe('absent')
+  })
+
+  it('discards deferred quota metadata after local authority changes without vetoing an admitted successor save', async () => {
+    let local = true
+    let sends = 0
+    const store = await storeService(
+      () => {
+        if (++sends === 2) local = false
+      },
+      { mayRun: async () => local },
+    )
+    const update = spyOn(store.manager, 'updateQuotaCache')
+    try {
+      const target = store.manager.getAccountsForQuotaCheck()[0]!
+      const outcome = await store.service.refreshAccount(target, {
+        force: true,
+      })
+      expect(sends).toBe(2)
+      expect(outcome.status).toBe('discarded')
+      expect(update).not.toHaveBeenCalled()
+      const row = (await store.rows())[0]
+      expect(row?.quota.status).toBe('absent')
+      expect(store.exchanged).toEqual(['token-a'])
+      expect(row?.credential?.refreshToken).toBe('token-a')
+    } finally {
+      await store.service.dispose()
+    }
+  })
+
+  it('refuses deferred quota project metadata when authority changes during resolution', async () => {
+    let local = true
+    const store = await storeService(undefined, {
+      mayRun: async () => local,
+      ensureProject: async (auth) => {
+        local = false
+        return {
+          auth: { ...auth, refresh: `${auth.refresh}|late-managed-project` },
+          effectiveProjectId: 'late-project',
+        }
+      },
+    })
+    const update = spyOn(store.manager, 'updateFromAuth')
+    try {
+      const target = store.manager.getAccountsForQuotaCheck()[0]!
+      const outcome = await store.service.refreshAccount(target, {
+        force: true,
+      })
+      expect(outcome.status).toBe('failed')
+      expect(update).not.toHaveBeenCalled()
+      expect(store.bearers).toHaveLength(0)
+      expect((await store.rows())[0]?.quota.status).toBe('absent')
+    } finally {
+      await store.service.dispose()
+    }
+  })
+
+  it('refuses a local quota physical send after authority changes during the final grant await', async () => {
+    let local = true
+    const store = await storeService(undefined, {
+      mayRun: async () => local,
+      assertGrantCurrent: async () => {
+        local = false
+      },
+    })
+    try {
+      const target = store.manager.getAccountsForQuotaCheck()[0]!
+      expect(
+        (await store.service.refreshAccount(target, { force: true })).status,
+      ).toBe('failed')
+      expect(store.bearers).toHaveLength(0)
+    } finally {
+      await store.service.dispose()
+    }
   })
 
   it('never attaches a reading to the credential that replaced the checked one', async () => {

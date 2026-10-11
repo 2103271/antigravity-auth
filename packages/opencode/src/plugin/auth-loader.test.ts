@@ -13,6 +13,7 @@ import {
   AccountManager as CoreAccountManager,
   createAccountRepositoryFactory,
   type EnrollmentAuthority,
+  enrollmentAuthority,
   initializeFreshAccountStore,
   loadCommonAuthClaustrum,
   loadCommonAuthStoreModules,
@@ -1295,6 +1296,93 @@ describe('createAuthLoader on the account store', () => {
 })
 
 describe('enrollment authority at loader and request start', () => {
+  it('serves public vault enrollment with a genuinely corrupt unused local store', async () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), 'corrupt-unused-store-')),
+    )
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      clearFetchState() {},
+      shutdownDiskSignatureCache: async () => {},
+    })
+    try {
+      const modules = await loadCommonAuthStoreModules()
+      const legacyPath = join(root, 'antigravity-accounts.json')
+      await initializeFreshAccountStore(modules, { legacyPath, now: Date.now })
+      const open = () =>
+        openAccountStore({
+          modules,
+          createRepository: createAccountRepositoryFactory(modules),
+          legacyPath,
+          exchange: async () => {
+            throw new Error('unused exchange')
+          },
+        })
+      const seeded = await open()
+      if (seeded.status !== 'ready') throw new Error(seeded.status)
+      const corruptPath = seeded.admission.paths.configPath
+      await seeded.repository.dispose()
+      const corrupt = '{genuinely invalid local store config'
+      writeFileSync(corruptPath, corrupt)
+      expect((await open()).status).not.toBe('ready')
+      const claustrum = await loadCommonAuthClaustrum()
+      const paths = claustrum.hostEnrollmentPaths({
+        stateDir: root,
+        host: 'opencode',
+      })
+      const name = 'antigravity-auth-opencode'
+      const manager = new claustrum.ClaustrumEnrollmentManager({
+        paths,
+        proposedName: name,
+        client: {
+          enrollPropose: async () => ({ requestId: 'synthetic-request' }),
+          enrollPoll: async () => ({
+            status: 'approved',
+            name,
+            token: 'ab'.repeat(32),
+            tokenGeneration: 1,
+          }),
+        },
+      })
+      expect((await manager.reconcile()).state).toBe('approved')
+      const localOpen = mock(open)
+      const loader = createAuthLoader({
+        client: {} as never,
+        providerId: 'google',
+        config: DEFAULT_CONFIG,
+        lifecycle,
+        readAuthority: () => enrollmentAuthority(paths, name, claustrum),
+        createFetch: () => {
+          throw new Error('local runtime constructed')
+        },
+        createVaultFetch: async () => ({
+          fetch: async () => new Response('vault-served'),
+          dispose() {},
+        }),
+        dependencies: { openAccountStore: localOpen },
+      })
+      const loaded = await loader(
+        async () => {
+          throw new Error('unused native login')
+        },
+        { models: {} } as never,
+      )
+      if (typeof loaded.fetch !== 'function') throw new Error('no vault fetch')
+      expect(
+        await (
+          await loaded.fetch(
+            'https://generativelanguage.googleapis.com/example',
+          )
+        ).text(),
+      ).toBe('vault-served')
+      expect(localOpen).not.toHaveBeenCalled()
+      expect(readFileSync(corruptPath, 'utf8')).toBe(corrupt)
+    } finally {
+      await lifecycle.dispose()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('does not open local accounts or read the native login while vault authority is active', async () => {
     const { createAuthLoader } = await import('./auth-loader')
     const { createPluginLifecycle } = await import('./lifecycle')

@@ -1660,6 +1660,8 @@ export function createStoreQuotaService(
     if (options.mayRun && !(await options.mayRun()))
       return { status: 'refused', reason: VAULT_ACCOUNT_REMEDY }
     const project = await credentials.ensureProject(auth)
+    if (options.mayRun && !(await options.mayRun()))
+      return { status: 'refused', reason: VAULT_ACCOUNT_REMEDY }
     if (project.auth.refresh !== auth.refresh) {
       // The resolved project belongs to this credential: the manager records
       // only the project fields, fenced on this account's ref, so they can
@@ -1687,6 +1689,8 @@ export function createStoreQuotaService(
             accessToken,
             ref: grantRef,
           })
+          if (options.mayRun && !(await options.mayRun()))
+            return { status: 'stale', reason: VAULT_ACCOUNT_REMEDY }
           return { status: 'current' }
         } catch (error) {
           return {
@@ -1718,13 +1722,16 @@ export function createStoreQuotaService(
     sidebar: options.sidebar,
   })
 
-  const record = (
+  const record = async (
     target: AccountQuotaTarget,
     result: AccountQuotaResult,
-  ): StoreQuotaOutcome => {
+  ): Promise<StoreQuotaOutcome> => {
     if (result.status !== 'ok' || result.quota === undefined) {
       return { status: 'failed', result }
     }
+    // A completed poll does not authorize deferred local metadata writes after enrollment.
+    if (options.mayRun && !(await options.mayRun()))
+      return { status: 'discarded', result }
     const held =
       target.rowRef === undefined
         ? undefined
@@ -1854,12 +1861,14 @@ export function createStoreQuotaService(
         indexFor: (account) => targets.indexOf(account as AccountQuotaTarget),
         force: refreshOptions.force === true,
       })
-      return results.map((result, position) => {
-        const target = targets[position]
-        return target === undefined
-          ? { status: 'failed' as const, result }
-          : record(target, result)
-      })
+      return Promise.all(
+        results.map((result, position) => {
+          const target = targets[position]
+          return target === undefined
+            ? { status: 'failed' as const, result }
+            : record(target, result)
+        }),
+      )
     },
     dispose: () => quotaManager.dispose(),
   }

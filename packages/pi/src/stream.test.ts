@@ -7,6 +7,9 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import * as actualCore from '@cortexkit/antigravity-auth-core'
 import {
   type Api,
@@ -17,6 +20,7 @@ import {
   type ThinkingLevel,
   Type,
 } from '@earendil-works/pi-ai'
+import type { ProviderConfig } from '@earendil-works/pi-coding-agent'
 
 const ensureProjectContextMock = mock(async () => ({
   auth: {
@@ -219,6 +223,275 @@ function terminalTextResponse(): Response {
     'data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}}\n\n',
   ])
 }
+
+describe('selected credential boundary', () => {
+  it('refuses local dispatch when enrollment changes during project resolution', async () => {
+    let admitted = true
+    ensureProjectContextMock.mockImplementationOnce(async () => {
+      admitted = false
+      return {
+        auth: { type: 'oauth', refresh: '', access: 'test-token', expires: 0 },
+        effectiveProjectId: 'test-project',
+      }
+    })
+    fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
+      terminalTextResponse(),
+    )
+    const { result } = await collectStream(
+      streamCortexKitAntigravity(
+        fakeModel(),
+        userContext(),
+        { apiKey: 'test-token' },
+        async () => {
+          if (!admitted) throw new Error('local enrollment changed')
+        },
+      ),
+    )
+    expect(result.errorMessage).toContain('local enrollment changed')
+    expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
+  })
+
+  it('production Pi provider refuses enrollment approved during its project await', async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'pi-public-authority-')),
+    )
+    try {
+      const { registerCortexKitPiAntigravity } = await import('./index.ts')
+      const { PiVaultSetup, PI_ANTIGRAVITY_ENROLLMENT_NAME } = await import(
+        './vault-setup.ts'
+      )
+      const claustrum = await actualCore.loadCommonAuthClaustrum()
+      const nativeAuthPath = join(root, 'auth.json')
+      const native = {
+        type: 'oauth' as const,
+        access: 'test-token',
+        refresh: 'synthetic-refresh|project',
+        expires: Date.now() + 3_600_000,
+      }
+      await writeFile(nativeAuthPath, JSON.stringify({ google: native }))
+      const vaultDir = join(root, 'vault')
+      const modeFile = join(vaultDir, 'pi-mode.json')
+      const setup = new PiVaultSetup({
+        claustrum,
+        stateDir: vaultDir,
+        modeFile,
+        readHostSlot: () => native,
+        connectEnrollment: async () => ({
+          enrollPropose: async () => ({ requestId: 'synthetic-request' }),
+          enrollPoll: async () => ({
+            status: 'approved' as const,
+            name: PI_ANTIGRAVITY_ENROLLMENT_NAME,
+            token: 'b'.repeat(64),
+            tokenGeneration: 1,
+          }),
+          close() {},
+        }),
+      })
+      const registerProvider = mock()
+      await registerCortexKitPiAntigravity(
+        {
+          registerProvider,
+          registerCommand: mock(),
+        },
+        {
+          vaultDir,
+          modeFile,
+          nativeAuthPath,
+          nativeStashPath: join(vaultDir, 'stash.json'),
+          loadClaustrum: async () => claustrum,
+          readHostSlot: () => native,
+        },
+      )
+      const provider = registerProvider.mock.calls[0]?.[1] as
+        | ProviderConfig
+        | undefined
+      const localStream = provider?.streamSimple
+      if (!localStream) throw new Error('local Pi provider was not registered')
+      ensureProjectContextMock.mockImplementationOnce(async () => {
+        expect((await setup.connectStep()).state).toBe('approved')
+        expect(
+          await actualCore.enrollmentAuthority(
+            setup.paths,
+            PI_ANTIGRAVITY_ENROLLMENT_NAME,
+            claustrum,
+          ),
+        ).toBe('vault')
+        return {
+          auth: {
+            type: 'oauth',
+            refresh: '',
+            access: 'test-token',
+            expires: 0,
+          },
+          effectiveProjectId: 'test-project',
+        }
+      })
+      fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
+        terminalTextResponse(),
+      )
+      const { result } = await collectStream(
+        localStream(fakeModel(), normalizeContext(userContext()), {
+          apiKey: 'test-token',
+        }),
+      )
+      expect(result.stopReason).toBe('error')
+      expect(result.errorMessage).toContain('Vault enrollment excludes local')
+      expect(ensureProjectContextMock).toHaveBeenCalledTimes(1)
+      expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  for (const source of ['transport', 'http', 'sse'] as const) {
+    it(`redacts selected credential in Pi ${source} errors`, async () => {
+      const detail =
+        'echo test-token Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+      fetchWithAgyCliTransportMock.mockImplementationOnce(async () => {
+        if (source === 'transport') throw new Error(detail)
+        if (source === 'http') return new Response(detail, { status: 403 })
+        return sseResponse([
+          `data: ${JSON.stringify({ response: { error: { code: 403, status: 'PERMISSION_DENIED', message: detail } } })}\n\n`,
+        ])
+      })
+      const { result } = await collectStream(
+        streamCortexKitAntigravity(fakeModel(), userContext(), {
+          apiKey: 'test-token',
+        }),
+      )
+      expect(result.stopReason).toBe('error')
+      expect(result.errorMessage).not.toContain('test-token')
+      expect(result.errorMessage).not.toContain('another-token')
+      expect(result.errorMessage).not.toContain('eyJ')
+      expect(result.errorMessage).toContain('[credential]')
+      if (source !== 'transport') expect(result.errorMessage).toContain('403')
+    })
+  }
+
+  for (const source of ['transport', 'http', 'sse', 'success'] as const) {
+    it(`uses the genuinely served opaque vault token at the Pi ${source} boundary`, async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), 'pi-vault-redaction-')),
+      )
+      const claustrum = await actualCore.loadCommonAuthClaustrum()
+      const fs = await actualCore.loadCommonAuthFs()
+      const tokenPath = join(root, 'enrollment-token.json')
+      await writeFile(
+        tokenPath,
+        JSON.stringify({ token: 'ab'.repeat(32), token_generation: 1 }),
+        { mode: 0o600 },
+      )
+      const opaque = 'opaque_selected_vault_734a1'
+      let admissions = 0
+      const vault = actualCore.createAntigravityVaultAccountSource({
+        claustrum,
+        host: 'pi',
+        rosterPath: join(root, 'roster.json'),
+        tokenPath,
+        isCustodyActive: () => true,
+        reporterSource: 'direct',
+        state: { path: join(root, 'state.json'), fs },
+        logger: { warn() {}, debug() {} },
+        connect: async () => ({
+          listScoped: async () => ({
+            view: 'synthetic-vault-view',
+            rows: [
+              {
+                id: 'cred-1',
+                categories: ['antigravity-native'],
+                credentialType: 'oauth' as const,
+                serves: [],
+                providerIds: [],
+                refreshAdapter: 'antigravity',
+                state: 'active' as const,
+                recordVersion: 1,
+                operations: ['read'],
+                createdAtMs: null,
+                accountId: 'account-a',
+              },
+            ],
+          }),
+          getScoped: async () => {
+            admissions++
+            return {
+              material: opaque,
+              recordVersion: 1,
+              expiresAtMs: Date.now() + 3_600_000,
+              credentialId: 'cred-1',
+              projectId: 'vault-project',
+              accountId: 'account-a',
+            }
+          },
+          reportAuthFailureScoped: async () => {},
+          close() {},
+        }),
+      })
+      try {
+        const { createPiVaultSend } = await import('./vault-source.ts')
+        const { CUSTODY_PROVIDER_KEY_MARKER } = await import('./index.ts')
+        const send = createPiVaultSend({
+          readMode: () => ({
+            ok: true,
+            record: { version: 1, mode: 'custody' },
+          }),
+          source: async () => vault,
+        })
+        fetchWithAgyCliTransportMock.mockImplementationOnce(
+          async (_url, init) => {
+            expect(new Headers(init.headers).get('authorization')).toBe(
+              `Bearer ${opaque}`,
+            )
+            if (source === 'transport') throw new Error(`echo ${opaque}`)
+            if (source === 'http')
+              return new Response(`echo ${opaque}`, { status: 403 })
+            return sseResponse([
+              `data: ${JSON.stringify({ response: source === 'sse' ? { error: { code: 403, message: `echo ${opaque}` } } : { candidates: [{ content: { parts: [{ text: opaque }] }, finishReason: 'STOP' }] } })}\n\n`,
+            ])
+          },
+        )
+        const { result } = await collectStream(
+          createCortexKitAntigravityVaultStream(
+            send,
+            CUSTODY_PROVIDER_KEY_MARKER,
+          )(fakeModel(), userContext(), {
+            apiKey: CUSTODY_PROVIDER_KEY_MARKER,
+          }),
+        )
+        expect(admissions).toBe(1)
+        expect(ensureProjectContextMock).not.toHaveBeenCalled()
+        if (source === 'success') {
+          expect(result.stopReason).toBe('stop')
+          expect(result.content).toEqual([{ type: 'text', text: opaque }])
+        } else {
+          expect(result.stopReason).toBe('error')
+          expect(result.errorMessage).not.toContain(opaque)
+          expect(result.errorMessage).toContain('[credential]')
+          if (source !== 'transport')
+            expect(result.errorMessage).toContain('403')
+        }
+      } finally {
+        vault.close()
+        await rm(root, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it('preserves error-looking successful Pi content exactly', async () => {
+    const text =
+      'test-token Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature {"error":"test-token"}'
+    const { result, events } = await runStream(
+      fakeModel(),
+      sseResponse([
+        `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }] } })}\n\n`,
+      ]),
+      'redaction-success',
+    )
+    expect(result.content).toEqual([{ type: 'text', text }])
+    expect(events.find((event) => event.type === 'text_delta')).toMatchObject({
+      delta: text,
+    })
+  })
+})
 
 async function runContextStream(context: Context, sessionId?: string) {
   fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
