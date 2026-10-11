@@ -308,9 +308,6 @@ export function createPiVaultRuntime(
         const authority = await enrollmentAuthority(
           settings.paths,
           PI_ANTIGRAVITY_ENROLLMENT_NAME,
-          {
-            readClaustrumEnrollmentStatus: async () => status.enrollment,
-          },
         )
         if (authority === 'local' && status.mode === 'custody')
           throw new PiVaultSendError(

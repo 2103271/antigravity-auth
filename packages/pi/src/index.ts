@@ -236,9 +236,6 @@ export async function registerCortexKitPiAntigravity(
     const authority = await enrollmentAuthority(
       setup.paths,
       PI_ANTIGRAVITY_ENROLLMENT_NAME,
-      {
-        readClaustrumEnrollmentStatus: async () => status.enrollment,
-      },
     )
     if (authority === 'unreadable' || status.mode === 'unreadable') {
       throw new PiVaultSetupError(

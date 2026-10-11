@@ -210,9 +210,7 @@ export class PiVaultSetup {
     const authority = await enrollmentAuthority(
       this.paths,
       PI_ANTIGRAVITY_ENROLLMENT_NAME,
-      {
-        readClaustrumEnrollmentStatus: async () => enrollment,
-      },
+      this.#options.claustrum,
     )
     return {
       ...(authority !== 'local'

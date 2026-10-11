@@ -1285,6 +1285,14 @@ describe('GA vault custody location', () => {
             true,
           )
           const before = await seed.read()
+          routes.push({
+            routeId: 'route-b',
+            credentialId: 'credential-b',
+            accountIdentity: 'identity-b',
+            label: 'vault-b@example.com',
+            email: 'vault-b@example.com',
+          })
+          const refreshesBeforeSwitch = refreshed
           const switched = await serving.commands.apply({
             request: {
               command: 'antigravity',
@@ -1295,6 +1303,7 @@ describe('GA vault custody location', () => {
             signal,
           })
           expect(switched.ok).toBe(true)
+          expect(refreshed).toBe(refreshesBeforeSwitch + 1)
           expect(JSON.stringify(notices)).not.toContain(
             'routing has not picked it up',
           )
@@ -1314,7 +1323,9 @@ describe('GA vault custody location', () => {
           expect(await seed.read()).toEqual(before)
           const vaultAgain = await serving.state.read({ scope, signal })
           expect(vaultAgain.readSeq).toBeGreaterThan(localRead.readSeq)
-          expect(refreshed).toBeGreaterThan(0)
+          if (vaultAgain.accounts.kind !== 'complete')
+            throw new Error('over limit')
+          expect(vaultAgain.accounts.rows).toHaveLength(2)
           expect(localDisposals).toBe(0)
           const restored = await serving.commands.apply({
             request: {

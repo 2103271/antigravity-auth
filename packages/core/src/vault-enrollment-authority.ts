@@ -7,10 +7,7 @@ export type EnrollmentAuthority = 'vault' | 'local' | 'unreadable'
 type EnrollmentPaths = Parameters<
   CommonAuthClaustrumModule['readClaustrumEnrollmentStatus']
 >[0]
-type EnrollmentReader = Pick<
-  CommonAuthClaustrumModule,
-  'readClaustrumEnrollmentStatus'
->
+type EnrollmentReader = Pick<CommonAuthClaustrumModule, 'enrollmentAuthority'>
 
 export const VAULT_ACCOUNT_REMEDY =
   'Vault account access is unavailable. Connect accounts in the vault, or disconnect the vault to use local accounts.'
@@ -29,22 +26,9 @@ export async function enrollmentAuthority(
   reader?: EnrollmentReader,
 ): Promise<EnrollmentAuthority> {
   try {
-    const status = await (
+    return await (
       reader ?? (await loadCommonAuthClaustrum())
-    ).readClaustrumEnrollmentStatus(paths, proposedName)
-    switch (status.state) {
-      case 'approved':
-        return 'vault'
-      case 'blocked':
-        return status.code === 'missing_token' ? 'vault' : 'unreadable'
-      case 'idle':
-      case 'pending':
-      case 'denied':
-        return 'local'
-      case 'busy':
-      case 'unavailable':
-        return 'unreadable'
-    }
+    ).enrollmentAuthority(paths, proposedName)
   } catch {
     return 'unreadable'
   }

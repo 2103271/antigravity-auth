@@ -1742,7 +1742,8 @@ function createGaVaultStateSource(input: {
  * token refresh queue do not run for vault accounts.
  */
 async function createGaVaultLocationServices(input: {
-  readonly afterApply?: (refreshVault: () => Promise<void>) => Promise<void>
+  readonly afterApply?: () => Promise<void>
+  readonly bindRefresh?: (refresh: (() => Promise<void>) | undefined) => void
   readonly nextReadSeq?: () => number
   readonly assertAdmission?: () => Promise<void>
   readonly custody: GaLocationCustody
@@ -1842,6 +1843,7 @@ async function createGaVaultLocationServices(input: {
         }),
         extras: [custody.menuSection()],
       })
+      input.bindRefresh?.(() => started.refreshAccounts())
       return {
         execute: started.execute,
         state: createGaVaultStateSource({
@@ -1860,9 +1862,7 @@ async function createGaVaultLocationServices(input: {
           menu,
           notify: start.notify,
           afterApply: () =>
-            input.afterApply
-              ? input.afterApply(() => started.refreshAccounts())
-              : started.refreshAccounts(),
+            input.afterApply ? input.afterApply() : started.refreshAccounts(),
         }),
       }
     },
@@ -1870,6 +1870,7 @@ async function createGaVaultLocationServices(input: {
       disposed ??= (async () => {
         const active = pipeline
         pipeline = null
+        input.bindRefresh?.(undefined)
         if (active) await active.dispose()
       })()
       return disposed
@@ -1928,9 +1929,8 @@ export function createGaLocationServicesFactory(
       if (closing) throw new Error('The location services are disposed')
       if (selected !== 'local') throw new Error(VAULT_ACCOUNT_REMEDY)
     }
-    const refreshSelectedSource = async (
-      refreshVault?: () => Promise<void>,
-    ): Promise<void> => {
+    let refreshVaultBinding: (() => Promise<void>) | undefined
+    const refreshSelectedSource = async (): Promise<void> => {
       const selected = await authority()
       if (closing) throw new Error('The location services are disposed')
       if (selected === 'unreadable') throw new Error(VAULT_ACCOUNT_REMEDY)
@@ -1939,7 +1939,10 @@ export function createGaLocationServicesFactory(
       if (selected === 'local') {
         await assertLocal()
         await localPipeline?.refreshAccounts()
-      } else await refreshVault?.()
+      } else {
+        if (vaultPromise) await vaultPromise
+        await refreshVaultBinding?.()
+      }
     }
     const getRepository = async (): Promise<AccountRepository> => {
       await assertLocal()
@@ -2196,6 +2199,9 @@ export function createGaLocationServicesFactory(
               bindings,
               nextReadSeq,
               afterApply: refreshSelectedSource,
+              bindRefresh: (refresh) => {
+                refreshVaultBinding = refresh
+              },
               assertAdmission: async () => {
                 const selected = await authority()
                 if (closing || selected !== 'vault')
