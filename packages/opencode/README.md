@@ -100,7 +100,7 @@ bun run build                                        # core -> opencode -> pi
 bun run --cwd packages/opencode smoke:tui            # bundle + spawn the precompiled TUI
 ```
 
-The public TUI loader chooses V1 (`src/tui-compiled/`, `src/tui-raw/`) or GA (`src/tui-ga-compiled/`, `src/tui-ga-raw/`) trees and probes virtual runtime support before selecting compiled or raw JSX. Other import errors propagate unchanged. Regenerate the trees with **Bun 1.4.2**: `bun run --cwd packages/opencode build:tui`. `bun run --cwd packages/opencode smoke:tui` checks fresh tarballs and consumer-local resolution. The private compiler and its input archive are repository-only and never shipped.
+The public TUI loader chooses the V1 or GA renderer. V1 uses `src/tui-compiled/tui.js` for the host runtime or `src/tui-raw/tui.tsx` as the raw fallback; GA uses the `src/tui-ga-compiled/` and `src/tui-ga-raw/` trees. The loader probes virtual runtime support before selecting compiled or raw JSX. Other import errors propagate unchanged. Regenerate the trees with **Bun 1.4.2**: `bun run --cwd packages/opencode build:tui`. `bun run --cwd packages/opencode smoke:tui` checks fresh tarballs and consumer-local resolution. The private compiler and its input archive are repository-only and never shipped.
 
 > Note: the pre-`2.0` inline quota helper is no longer shipped. Use `antigravity-auth quota [--refresh] [--json]` from this package or from the standalone CLI.
 
