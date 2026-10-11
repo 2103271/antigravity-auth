@@ -1,5 +1,6 @@
 import { expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import {
   createPublicCommandInspector,
@@ -171,12 +172,25 @@ it('owned signaling rejects reused birth identities and tolerates a signal-exit 
 it('owned cleanup kills a surviving descendant after its session leader exits', async () => {
   const root = mkdtempSync('/tmp/native-v1-descendant-')
   const inspector = await createPublicCommandInspector()
+  const captured = join(root, 'ancestry-captured')
   const child = startChild(
     'descendant-control',
     [
       '/usr/bin/python3',
       '-c',
-      'import os,time; pid=os.fork(); time.sleep(30) if pid==0 else print(pid,flush=True)',
+      [
+        'import os,sys,time',
+        'pid=os.fork()',
+        'if pid==0:',
+        '  time.sleep(30)',
+        'else:',
+        '  print(pid,flush=True)',
+        '  deadline=time.monotonic()+5',
+        '  while not os.path.exists(sys.argv[1]):',
+        '    if time.monotonic()>=deadline: sys.exit(2)',
+        '    time.sleep(0.01)',
+      ].join('\n'),
+      captured,
     ],
     root,
     { PATH: process.env.PATH },
@@ -184,15 +198,30 @@ it('owned cleanup kills a surviving descendant after its session leader exits', 
     inspector,
   )
   try {
-    await finite(child.exited, 5000, 'Session leader did not exit')
+    const captureDeadline = performance.now() + 1000
+    while (!child.receipt.stdout.trim()) {
+      if (performance.now() >= captureDeadline)
+        throw new Error('Session leader did not report its descendant')
+      await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    }
     const descendant = Number(child.receipt.stdout.trim())
     expect(descendant).toBeGreaterThan(0)
+    // Capture the child while its parent can prove ancestry. Cleanup must
+    // retain that identity after the parent exits, not adopt an unseen orphan.
+    expect(
+      inspectPublicCommandScope(child.scope, inspector).some(
+        (member) => member.pid === descendant,
+      ),
+    ).toBe(true)
+    writeFileSync(captured, 'captured', { flag: 'wx', mode: 0o600 })
+    await finite(child.exited, 5000, 'Session leader did not exit')
     expect(
       inspectPublicCommandScope(child.scope, inspector).some(
         (member) => member.pid === descendant,
       ),
     ).toBe(true)
     await child.stop()
+    expect(child.receipt.exitCode).toBe(0)
     expect(child.receipt.reaped).toBe(true)
     expect(inspectPublicCommandScope(child.scope, inspector)).toEqual([])
     expect(
