@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -724,6 +725,16 @@ describe('createGaLocationServices (production factory)', () => {
       const directory = join(root, 'location')
       const { mkdirSync } = await import('node:fs')
       mkdirSync(directory)
+      mkdirSync(join(directory, '.opencode'))
+      // This test measures manual quota actions. Automatic refreshes would
+      // change the same counters before the account is disabled.
+      await writeFile(
+        join(directory, '.opencode', 'antigravity.json'),
+        JSON.stringify({
+          background_quota_refresh: false,
+          proactive_token_refresh: false,
+        }),
+      )
       const legacyPath = join(root, 'config', GA_ACCOUNTS_FILE)
       const modules = await loadCommonAuthStoreModules()
       await initializeFreshAccountStore(modules, { legacyPath, now: Date.now })
@@ -835,6 +846,8 @@ describe('createGaLocationServices (production factory)', () => {
         })
         if (read.accounts.kind !== 'complete') throw new Error('over limit')
         expect(read.accounts.rows).toHaveLength(2)
+        expect(runtime.backgroundQuotaRefresh).toBeNull()
+        expect(runtime.refreshQueue()).toBeNull()
         expect(observed.map((entry) => entry.readSeq)).toEqual([read.readSeq])
         const text = JSON.stringify(read)
         expect(text).not.toContain('@example.com')

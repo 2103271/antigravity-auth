@@ -1077,16 +1077,16 @@ describe('authorized local quota fetcher', () => {
 //
 // Use the published store and filesystem code copied into the core package.
 // Its common-auth-embedded/source-output.json records each file's size and
-// SHA-256 from the pinned 0.14.1 npm archive. Verify every file against that
+// SHA-256 from the pinned 0.14.2 npm archive. Verify every file against that
 // record before loading it with loadCommonAuthStoreModules; any difference
 // fails the test. Account files live in a separate disposable directory.
 // ---------------------------------------------------------------------------
 
 const RELEASED_COMMON_AUTH = {
   package: '@cortexkit/common-auth',
-  version: '0.14.1',
+  version: '0.14.2',
   tarballSha256:
-    '544304bbcc287aa93cb2a94938e20c80e07509ebbcafbc6b784a3893187868fb',
+    'bf0f0828d155183dec1c29e5277ededd6cbd46e6b839ca696434e477f081216b',
 } as const
 
 async function embeddedFilesBelow(
@@ -1105,8 +1105,8 @@ async function embeddedFilesBelow(
 let genuine: Promise<CommonAuthStoreModules> | undefined
 
 /**
- * The embedded store and fs modules, after each of their files matches the
- * size and SHA-256 recorded for the released 0.14.1 archive.
+ * Loads the embedded store and fs modules after each file matches the
+ * size and SHA-256 recorded for the released 0.14.2 archive.
  */
 function genuineModules(): Promise<CommonAuthStoreModules> {
   genuine ??= (async () => {
