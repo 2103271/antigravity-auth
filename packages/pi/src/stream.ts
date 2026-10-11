@@ -6,6 +6,7 @@ import {
   buildAntigravityHarnessUserAgent,
   ensureProjectContext,
   fetchWithAgyCliTransport,
+  forwardAbort,
   orderAgyRequestPayloadInPlace,
   resolveModelForHeaderStyle,
 } from '@cortexkit/antigravity-auth-core'
@@ -566,14 +567,13 @@ function runAntigravityStream(
     let response: Response | undefined
     let requestAbort: AbortController | undefined
     let chunkIterator: AsyncIterator<GeminiStreamChunk> | undefined
+    let detachCaller = () => {}
 
     try {
       const sessionKey = getRequestSessionKey(context, options)
       requestAbort = new AbortController()
-      const requestSignal = options?.signal
-        ? AbortSignal.any([options.signal, requestAbort.signal])
-        : requestAbort.signal
-      response = await open(sessionKey, requestSignal)
+      detachCaller = forwardAbort(options?.signal, requestAbort)
+      response = await open(sessionKey, requestAbort.signal)
 
       if (!response.ok) {
         throw new Error(
@@ -800,6 +800,8 @@ function runAntigravityStream(
         error instanceof Error ? error.message : String(error)
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()
+    } finally {
+      detachCaller()
     }
   })()
 
