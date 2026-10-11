@@ -19,7 +19,7 @@
     },
     "packages/core": {
       "name": "@cortexkit/antigravity-auth-core",
-      "version": "2.2.1",
+      "version": "3.0.0",
       "dependencies": {
         "@cortexkit/claustrum-client": "0.6.2",
         "xdg-basedir": "^5.1.0",
@@ -44,12 +44,12 @@
     },
     "packages/opencode": {
       "name": "@cortexkit/opencode-antigravity-auth",
-      "version": "2.2.1",
+      "version": "3.0.0",
       "bin": {
         "antigravity-auth": "./dist/cli.js",
       },
       "dependencies": {
-        "@cortexkit/antigravity-auth-core": "2.2.1",
+        "@cortexkit/antigravity-auth-core": "3.0.0",
         "jsonc-parser": "^3.3.1",
         "xdg-basedir": "^5.1.0",
         "zod": "^4.0.0",
@@ -87,9 +87,9 @@
     },
     "packages/pi": {
       "name": "@cortexkit/pi-antigravity-auth",
-      "version": "2.2.1",
+      "version": "3.0.0",
       "dependencies": {
-        "@cortexkit/antigravity-auth-core": "2.2.1",
+        "@cortexkit/antigravity-auth-core": "3.0.0",
         "@cortexkit/claustrum-client": "0.6.2",
       },
       "devDependencies": {
