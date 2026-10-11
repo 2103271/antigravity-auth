@@ -12,6 +12,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { build as bundle } from 'esbuild'
+import sourceManifest from '../package.json'
 import {
   auditGraph,
   checkGaGraph,
@@ -24,6 +25,7 @@ import { sha256 } from './embed-common-auth'
 
 const repo = resolve(PACKAGE_ROOT, '../..')
 const productName = '@cortexkit/opencode-antigravity-auth'
+const coreName = '@cortexkit/antigravity-auth-core'
 const baselineRevision = '45625093922278e7d8f1f1415df42bbc0ca1883e'
 function run(
   command: string,
@@ -217,25 +219,43 @@ function orderedMap(value: object): Record<string, unknown> {
 
 export function expectedCandidateGraph(
   baselineGraph: readonly unknown[],
+  candidateMetadata: { version: string; corePin: string },
 ): unknown[] {
   let productRows = 0
   const graph = baselineGraph.map((row) => {
     if (!Array.isArray(row) || row[0] !== productName) return row
     productRows++
+    const dependencies: unknown = row[3]
     const peers: unknown = row[4]
     if (
       row.length !== 5 ||
       row[1] !== productName ||
+      typeof row[2] !== 'string' ||
+      !row[2] ||
+      !dependencies ||
+      typeof dependencies !== 'object' ||
+      Array.isArray(dependencies) ||
+      !Object.hasOwn(dependencies, coreName) ||
+      Object.values(dependencies).some(
+        (value) => typeof value !== 'string' || !value,
+      ) ||
       !peers ||
       typeof peers !== 'object' ||
       Array.isArray(peers) ||
+      Object.values(peers).some(
+        (value) => typeof value !== 'string' || !value,
+      ) ||
       Object.hasOwn(peers, '@opencode/plugin')
     )
       throw new Error('Unexpected historical product graph row')
-    // Both consumers use the same core tarball. Only the product's optional
-    // OpenCode 2 peer declaration changes; no installed package is exempted.
+    // Both consumers install the same fresh core tarball. Expect the source
+    // product's version and core pin, plus the explicit optional OpenCode 2 peer;
+    // every other dependency, peer and installed package remains unchanged.
     return [
-      ...row.slice(0, 4),
+      row[0],
+      row[1],
+      candidateMetadata.version,
+      orderedMap({ ...dependencies, [coreName]: candidateMetadata.corePin }),
       orderedMap({ ...peers, '@opencode/plugin': '>=2.0.22' }),
     ]
   })
@@ -476,7 +496,13 @@ async function main() {
           false,
           'baseline',
         )
-        baselines.set(ui, expectedCandidateGraph(base.graph))
+        baselines.set(
+          ui,
+          expectedCandidateGraph(base.graph, {
+            version: sourceManifest.version,
+            corePin: sourceManifest.dependencies[coreName],
+          }),
+        )
       }
       for (const scripts of [true, false]) {
         const tar = await pack(
