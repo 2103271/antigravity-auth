@@ -48,11 +48,15 @@ function success(
 }
 
 function createLifecycle(): PluginLifecycle {
+  let closing = false
   return {
+    isClosing: () => closing,
     getAccountManager: () => null,
     replaceAccountRuntime: mock(async () => true),
     register: mock(() => {}),
-    dispose: mock(async () => {}),
+    dispose: mock(async () => {
+      closing = true
+    }),
   }
 }
 

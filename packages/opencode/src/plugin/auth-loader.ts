@@ -266,6 +266,10 @@ export function createAuthLoader({
     return openStore()
   }
   let closed = false
+  const isClosed = (): boolean => closed || lifecycle.isClosing()
+  const assertOpen = (): void => {
+    if (isClosed()) throw new Error('The account loader is disposed')
+  }
   let fetchRuntime: LocalFetchRuntime | null = null
   let vaultFetchRuntime: Promise<AuthFetchRuntime> | null = null
   let currentRequestSource: EnrollmentAuthority | undefined
@@ -307,7 +311,7 @@ export function createAuthLoader({
     getAuth: GetAuth,
     source: 'pool-file' | 'store',
   ): Promise<void> => {
-    if (closed) {
+    if (isClosed()) {
       await accountManager.dispose()
       throw new Error('The account loader is disposed')
     }
@@ -342,6 +346,10 @@ export function createAuthLoader({
         refreshQueue.setAccountManager(accountManager)
       } else if (source === 'store') {
         const opening = await openStore()
+        if (isClosed()) {
+          await accountManager.dispose()
+          throw new Error('The account loader is disposed')
+        }
         if (opening.status !== 'ready') {
           throw new Error('the account store closed while it was in use')
         }
@@ -362,11 +370,11 @@ export function createAuthLoader({
     // A store-backed manager was loaded from this plugin's single store
     // opening; its fetch checks every send against that same repository.
     const opening = source === 'store' ? await openStore() : undefined
-    if (closed || (opening !== undefined && opening.status !== 'ready')) {
+    if (isClosed() || (opening !== undefined && opening.status !== 'ready')) {
       await refreshQueue?.dispose()
       await accountManager.dispose()
       throw new Error(
-        closed
+        isClosed()
           ? 'The account loader is disposed'
           : 'the account store closed while it was in use',
       )
@@ -411,6 +419,7 @@ export function createAuthLoader({
       throw error
     }
     if (!published) throw new Error('The account loader is disposed')
+    assertOpen()
     refreshQueue?.start()
 
     // Push the freshly materialized account pool into the sidebar so the
@@ -449,9 +458,11 @@ export function createAuthLoader({
 
   async function readLocalHostAuth(getAuth: GetAuth) {
     const auth = await getAuth()
+    assertOpen()
     // After disconnect, the activation marker is not a local account.
     // Refuse before opening or repairing the pool; a real sign-in is required.
     const claustrum = await loadCommonAuthClaustrum()
+    assertOpen()
     claustrum.assertHostSlotMatchesMode({
       mode: 'local',
       auth,
@@ -464,14 +475,17 @@ export function createAuthLoader({
     getAuth: GetAuth,
     provider: Provider,
   ): Promise<LoaderResult | Record<string, unknown>> {
-    if (closed) throw new Error('The account loader is disposed')
+    assertOpen()
     onGetAuth?.(getAuth)
     latestGetAuth = getAuth
     const authority = (await readAuthority?.()) ?? 'local'
+    assertOpen()
     if (authority !== 'local') return finishLoad(provider)
     let auth = await readLocalHostAuth(getAuth)
+    assertOpen()
 
     const opening = await openStore()
+    assertOpen()
     if (opening.status === 'ready') {
       // This plugin's account pool now comes only from the store's
       // repository; the retired pool file is never read or cleared here.
@@ -531,6 +545,7 @@ export function createAuthLoader({
         }
         throw error
       }
+      assertOpen()
       const drift = detectAuthStorageDrift(auth, storedAccounts)
       if (drift.status === 'restorable' && drift.account) {
         auth = buildAuthFromStoredAccount(drift.account)
@@ -558,6 +573,7 @@ export function createAuthLoader({
     }
 
     if (!isOAuthAuth(auth)) {
+      assertOpen()
       try {
         await deps.clearAccounts()
       } catch {}
@@ -572,6 +588,7 @@ export function createAuthLoader({
   async function finishLoad(
     provider: Provider,
   ): Promise<LoaderResult | Record<string, unknown>> {
+    assertOpen()
     if (deps.isDebugEnabled()) {
       const logPath = deps.getLogFilePath()
       if (logPath) {
@@ -583,6 +600,7 @@ export function createAuthLoader({
       }
     }
 
+    assertOpen()
     if (provider.models) {
       for (const model of Object.values(provider.models)) {
         if (model) (model as ProviderModel).cost = { input: 0, output: 0 }
@@ -599,11 +617,11 @@ export function createAuthLoader({
       // matches the host's `LoaderResult.fetch` signature exactly
       // (no `this` binding) so behavior is preserved.
       fetch: async (input, init) => {
-        if (closed) throw new Error('The account loader is disposed')
+        assertOpen()
         const authority = (await readAuthority?.()) ?? 'local'
-        // Disposal may have finished while the authority was read; nothing
-        // is built or sent after it.
-        if (closed) throw new Error('The account loader is disposed')
+        // Shutdown may have begun while the authority was read; nothing is
+        // built or sent after admission closes, even while disposal drains.
+        assertOpen()
         if (authority === 'unreadable') throw new Error(VAULT_ACCOUNT_REMEDY)
         if (authority === 'vault') {
           currentRequestSource = 'vault'
@@ -613,7 +631,7 @@ export function createAuthLoader({
             throw error
           })
           const vaultRuntime = await vaultFetchRuntime
-          if (closed) throw new Error('The account loader is disposed')
+          assertOpen()
           return vaultRuntime.fetch(input, init)
         }
         if (
@@ -633,10 +651,10 @@ export function createAuthLoader({
             localRequestReload = started
           }
           await localRequestReload
-          if (closed) throw new Error('The account loader is disposed')
+          assertOpen()
           if ((await readAuthority()) !== 'local')
             throw new Error(VAULT_ACCOUNT_REMEDY)
-          if (closed) throw new Error('The account loader is disposed')
+          assertOpen()
         }
         if (currentRequestSource !== 'local' || !fetchRuntime)
           throw new Error('The local account runtime is unavailable')
@@ -646,11 +664,15 @@ export function createAuthLoader({
   }
 
   reloadRuntime = async (getAuth: GetAuth): Promise<void> => {
-    if (closed) throw new Error('The account loader is disposed')
-    if (((await readAuthority?.()) ?? 'local') !== 'local') return
+    assertOpen()
+    const authority = (await readAuthority?.()) ?? 'local'
+    assertOpen()
+    if (authority !== 'local') return
     const auth = await readLocalHostAuth(getAuth)
+    assertOpen()
     if (!isOAuthAuth(auth) && !readAuthority) return
     const opening = await openStore()
+    assertOpen()
     if (opening.status === 'ready') {
       const nextManager = await loadAccountManagerFromRepository(
         opening.repository,
@@ -675,6 +697,7 @@ export function createAuthLoader({
     return runLoader(getAuth, provider)
   }
   async function reload(getAuth: GetAuth): Promise<void> {
+    assertOpen()
     const next = reloadChain.then(() => reloadRuntime(getAuth))
     reloadChain = next.catch(() => {})
     return next

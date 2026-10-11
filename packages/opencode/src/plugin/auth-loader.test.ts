@@ -17,15 +17,16 @@ import {
   loadCommonAuthClaustrum,
   loadCommonAuthStoreModules,
 } from '@cortexkit/antigravity-auth-core'
+import { createOpencodeClient } from '@opencode-ai/sdk'
 
-import type { AccountManager } from './accounts'
+import { AccountManager } from './accounts'
 import { createAuthLoader } from './auth-loader'
 import { DEFAULT_CONFIG } from './config'
 import { createPluginLifecycle, type PluginLifecycle } from './lifecycle'
 import {
   createLocationProactiveRefreshQueue,
   type ProactiveRefreshDependencies,
-  type ProactiveRefreshQueue,
+  ProactiveRefreshQueue,
 } from './refresh-queue'
 import { type AccountStorageV4, openAccountStore } from './storage'
 import type { GetAuth, Provider } from './types'
@@ -52,8 +53,10 @@ function storedAccounts(): AccountStorageV4 {
 function createLifecycle() {
   const replacements: Array<{ manager: unknown; queue: unknown }> = []
   const disposables: Array<{ dispose(): Promise<void> | void }> = []
+  let closing = false
   const lifecycle: PluginLifecycle = {
     getAccountManager: () => null,
+    isClosing: () => closing,
     replaceAccountRuntime: mock(async (manager, queue) => {
       replacements.push({ manager, queue })
       return true
@@ -62,6 +65,7 @@ function createLifecycle() {
       disposables.push(disposable)
     }),
     dispose: mock(async () => {
+      closing = true
       for (const disposable of disposables) await disposable.dispose()
     }),
   }
@@ -97,6 +101,234 @@ const poolFileOnly = async () =>
   ({ status: 'initialization-required' }) as const
 
 describe('createAuthLoader', () => {
+  for (const heldDrain of ['request', 'queue'] as const) {
+    it(`refuses new vault admission while final shutdown holds the ${heldDrain} drain`, async () => {
+      const requestHeld = deferred()
+      const queueHeld = deferred()
+      const events: string[] = []
+      const { lifecycle } = createOwnedLifecycle()
+      const manager = new AccountManager()
+      manager.dispose = mock(async () => {
+        events.push('manager:dispose')
+      })
+      const client = createOpencodeClient({
+        fetch: async () => {
+          events.push('host:mutation')
+          throw new Error('No host I/O is allowed')
+        },
+      })
+      const queue = new ProactiveRefreshQueue(client, 'google')
+      queue.dispose = mock(async () => {
+        events.push('queue:stop')
+        await queueHeld.promise
+        events.push('queue:drained')
+      })
+      const requestDispose = mock(async () => {
+        events.push('request:abort')
+        await requestHeld.promise
+        events.push('request:drained')
+      })
+      await lifecycle.replaceAccountRuntime(manager, queue, {
+        retire: async () => {},
+        dispose: requestDispose,
+      })
+      const getAuth: GetAuth = mock(async () => {
+        throw new Error('Native auth must stay unread')
+      })
+      const readAuthority = mock(async () => 'vault' as const)
+      const localConstruction = mock(() => {
+        throw new Error('Local source must stay unconstructed')
+      })
+      const vaultSend = mock(async () => {
+        events.push('vault:mutation')
+        return new Response('late-vault-send')
+      })
+      const vaultConstruction = mock(async () => ({
+        fetch: vaultSend,
+        dispose: mock(async () => {}),
+      }))
+      const openStore = mock(poolFileOnly)
+      const loadAccounts = mock(async () => storedAccounts())
+      const clearAccounts = mock(async () => {})
+      const publishSidebar = mock(async () => {})
+      const loader = createAuthLoader({
+        client,
+        providerId: 'google',
+        config: { ...DEFAULT_CONFIG, proactive_token_refresh: false },
+        lifecycle,
+        readAuthority,
+        createFetch: localConstruction,
+        createVaultFetch: vaultConstruction,
+        publishSidebar,
+        dependencies: {
+          openAccountStore: openStore,
+          loadAccounts,
+          clearAccounts,
+          isDebugEnabled: () => false,
+        },
+      })
+      const provider: Provider = {
+        id: 'google',
+        name: 'Google',
+        source: 'custom',
+        env: [],
+        options: {},
+        models: {},
+      }
+      const result = await loader(getAuth, provider)
+      if (!('fetch' in result) || typeof result.fetch !== 'function')
+        throw new Error('No delegating fetch returned')
+      readAuthority.mockClear()
+      let finished = false
+      const disposal = Promise.resolve(lifecycle.dispose()).then(() => {
+        finished = true
+      })
+      try {
+        expect(events).toEqual(['request:abort', 'queue:stop'])
+        expect(requestDispose).toHaveBeenCalledTimes(1)
+        expect(queue.dispose).toHaveBeenCalledTimes(1)
+        // Release the other drain so each case proves that its named drain
+        // alone keeps the producer's close hook from running.
+        if (heldDrain === 'request') queueHeld.resolve()
+        else requestHeld.resolve()
+        await Promise.resolve()
+        expect(finished).toBe(false)
+        expect(manager.dispose).not.toHaveBeenCalled()
+        await expect(result.fetch('https://example.test/new')).rejects.toThrow(
+          'The account loader is disposed',
+        )
+        await expect(loader.load(getAuth, provider)).rejects.toThrow(
+          'The account loader is disposed',
+        )
+        await expect(loader.reload(getAuth)).rejects.toThrow(
+          'The account loader is disposed',
+        )
+        expect(readAuthority).not.toHaveBeenCalled()
+        expect(getAuth).not.toHaveBeenCalled()
+        expect(openStore).not.toHaveBeenCalled()
+        expect(loadAccounts).not.toHaveBeenCalled()
+        expect(clearAccounts).not.toHaveBeenCalled()
+        expect(localConstruction).not.toHaveBeenCalled()
+        expect(vaultConstruction).not.toHaveBeenCalled()
+        expect(vaultSend).not.toHaveBeenCalled()
+        expect(publishSidebar).not.toHaveBeenCalled()
+      } finally {
+        requestHeld.resolve()
+        queueHeld.resolve()
+        await disposal
+      }
+      expect(finished).toBe(true)
+      expect(events).not.toContain('vault:mutation')
+      expect(events).not.toContain('host:mutation')
+      expect(events.at(-1)).toBe('manager:dispose')
+    })
+  }
+
+  for (const seam of [
+    'fetch authority',
+    'load authority',
+    'reload authority',
+    'vault construction',
+  ] as const) {
+    it(`refuses admission after awaiting ${seam} while final shutdown still drains`, async () => {
+      const drain = deferred()
+      const entered = deferred()
+      const awaited = deferred<EnrollmentAuthority>()
+      const { lifecycle } = createOwnedLifecycle()
+      const manager = new AccountManager()
+      const managerDispose = mock(async () => {})
+      manager.dispose = managerDispose
+      await lifecycle.replaceAccountRuntime(manager, null, {
+        retire: async () => {},
+        dispose: () => drain.promise,
+      })
+      let holdAuthority = false
+      const readAuthority = mock(async () => {
+        if (holdAuthority) {
+          entered.resolve()
+          return awaited.promise
+        }
+        return 'vault' as const
+      })
+      const getAuth: GetAuth = mock(async () => {
+        throw new Error('Native auth must stay unread')
+      })
+      const vaultSend = mock(async () => new Response('late-send'))
+      const vaultDispose = mock(async () => {})
+      const vaultConstruction = mock(async () => {
+        if (seam === 'vault construction') {
+          entered.resolve()
+          await awaited.promise
+        }
+        return { fetch: vaultSend, dispose: vaultDispose }
+      })
+      const localConstruction = mock(() => {
+        throw new Error('Local source must stay unconstructed')
+      })
+      const loader = createAuthLoader({
+        client: createOpencodeClient(),
+        providerId: 'google',
+        config: { ...DEFAULT_CONFIG, proactive_token_refresh: false },
+        lifecycle,
+        readAuthority,
+        createFetch: localConstruction,
+        createVaultFetch: vaultConstruction,
+        dependencies: { isDebugEnabled: () => false },
+      })
+      const provider: Provider = {
+        id: 'google',
+        name: 'Google',
+        source: 'custom',
+        env: [],
+        options: {},
+        models: {},
+      }
+      const loaded = await loader(getAuth, provider)
+      if (typeof loaded.fetch !== 'function') throw new Error('No fetch')
+      holdAuthority = seam !== 'vault construction'
+      const pending =
+        seam === 'load authority'
+          ? loader.load(getAuth, provider)
+          : seam === 'reload authority'
+            ? loader.reload(getAuth)
+            : loaded.fetch('https://example.test/pending')
+      // Handle a rejection while the admission is held; assert it only after
+      // releasing the gate because Bun's matcher can wait synchronously.
+      void pending.catch(() => {})
+      await entered.promise
+      let finished = false
+      const disposal = Promise.resolve(lifecycle.dispose()).then(() => {
+        finished = true
+      })
+      try {
+        expect(finished).toBe(false)
+        expect(managerDispose).not.toHaveBeenCalled()
+        awaited.resolve(
+          seam === 'load authority' || seam === 'reload authority'
+            ? 'local'
+            : 'vault',
+        )
+        await expect(pending).rejects.toThrow('The account loader is disposed')
+        expect(finished).toBe(false)
+        expect(getAuth).not.toHaveBeenCalled()
+        expect(localConstruction).not.toHaveBeenCalled()
+        expect(vaultConstruction).toHaveBeenCalledTimes(
+          seam === 'vault construction' ? 1 : 0,
+        )
+        expect(vaultSend).not.toHaveBeenCalled()
+        expect(vaultDispose).not.toHaveBeenCalled()
+      } finally {
+        awaited.resolve('vault')
+        drain.resolve()
+        await disposal
+      }
+      expect(managerDispose).toHaveBeenCalledTimes(1)
+      expect(vaultDispose).toHaveBeenCalledTimes(
+        seam === 'vault construction' ? 1 : 0,
+      )
+    })
+  }
+
   it('serves a fresh vault activation without reading native auth, then refuses its marker after disconnect without touching local files', async () => {
     const root = mkdtempSync(join(tmpdir(), 'v1-vault-roundtrip-'))
     const nativeFile = join(root, 'auth.json')
