@@ -205,6 +205,11 @@ export default async function(pi) {
     })
     session = created.session
     expect(created.extensionsResult.errors).toEqual([])
+    expect(
+      created.extensionsResult.extensions.flatMap((extension) => [
+        ...extension.commands.keys(),
+      ]),
+    ).toContain('antigravity')
     expect(events.indexOf('slot:end')).toBeGreaterThan(
       events.indexOf('factory:start'),
     )
@@ -262,3 +267,277 @@ export default async function(pi) {
     }
   }
 })
+
+const recoveryKey = Symbol.for('antigravity.pi.startup.recovery.fixture')
+
+// Pretty-printed with a neighbour so any re-serialization changes the bytes.
+const NATIVE_AUTH = `{
+  "google": { "type": "oauth", "access": "synthetic-native-access", "refresh": "synthetic-native-refresh|synthetic-native-project", "expires": 1 },
+  "anthropic": { "type": "api_key", "key": "synthetic-neighbour" }
+}
+`
+
+interface OwnedPiHome {
+  directory: string
+  agentDir: string
+  vaultDir: string
+  modeFile: string
+  authPath: string
+  stashPath: string
+  statePath: string
+}
+
+/**
+ * Lockout states the real Pi loader must survive with /antigravity and a
+ * refusing google provider registered. Each writes synthetic owner-only files:
+ * the enrollment state file, the mode file, Pi's auth.json and the saved-login
+ * stash. The extension must not overwrite auth.json or the stash; only the
+ * Vault section, /login or /logout may change them.
+ */
+const LOCKOUTS: Array<{
+  name: string
+  prepare: (home: OwnedPiHome) => Promise<void>
+  /** Text of the synchronization error the session_start handler reports. */
+  reason: string
+  /**
+   * Text of the request failure. With no native OAuth entry, Pi reaches the
+   * extension's stream and the extension refuses. With a native OAuth entry,
+   * Pi itself finds no usable auth for a provider without OAuth and refuses
+   * before the stream runs.
+   */
+  refusal: string
+}> = [
+  {
+    name: 'an unreadable enrollment state beside a native login',
+    prepare: async (home) => {
+      await writeFile(home.statePath, '{ torn', { mode: 0o600 })
+      await writeFile(home.authPath, NATIVE_AUTH, { mode: 0o600 })
+    },
+    reason: 'cannot be read',
+    refusal: 'Provider is not configured: google',
+  },
+  {
+    name: 'custody mode with no enrollment and no native login',
+    prepare: async (home) => {
+      await writeFile(
+        home.modeFile,
+        JSON.stringify({ version: 1, mode: 'custody' }),
+        { mode: 0o600 },
+      )
+      await writeFile(home.authPath, '{}\n', { mode: 0o600 })
+    },
+    reason: 'must be approved',
+    refusal: 'must be approved',
+  },
+  {
+    name: 'a native Google login that conflicts with the saved one',
+    prepare: async (home) => {
+      // The genuine slot helper saves one login and installs the placeholder;
+      // a later native /login writes a different google entry over it.
+      await writeFile(
+        home.authPath,
+        JSON.stringify({ google: { type: 'oauth', access: 'saved' } }),
+        { mode: 0o600 },
+      )
+      const { openPiSlot } = await actualCore.loadCommonAuthPiSlot()
+      await openPiSlot({
+        authPath: home.authPath,
+        stashPath: home.stashPath,
+        provider: 'google',
+        placeholderKey: 'antigravity-vault-custody',
+      }).enterVault()
+      await writeFile(home.authPath, NATIVE_AUTH, { mode: 0o600 })
+    },
+    reason: 'native Google login changed',
+    refusal: 'Provider is not configured: google',
+  },
+]
+
+for (const lockout of LOCKOUTS)
+  it(`the real Pi loader keeps /antigravity and refuses google requests for ${lockout.name}`, async () => {
+    const directory = await mkdtemp(
+      join(
+        process.platform === 'win32' ? tmpdir() : '/tmp',
+        'antigravity-pi-recovery-',
+      ),
+    )
+    const agentDir = join(directory, 'native-agent')
+    const vaultDir = join(directory, 'plugin-vault')
+    const claustrum = await actualCore.loadCommonAuthClaustrum()
+    const home: OwnedPiHome = {
+      directory,
+      agentDir,
+      vaultDir,
+      modeFile: join(vaultDir, 'pi-mode.json'),
+      authPath: join(agentDir, 'auth.json'),
+      stashPath: join(vaultDir, 'google-login-stash.json'),
+      statePath: claustrum.hostEnrollmentPaths({
+        stateDir: vaultDir,
+        host: 'pi',
+      }).statePath,
+    }
+    const previous = new Map(
+      [
+        'HOME',
+        'PI_CODING_AGENT_DIR',
+        'PI_AGENT_DIR',
+        'PI_ANTIGRAVITY_AUTH_FILE',
+        'PI_OFFLINE',
+      ].map((name) => [name, process.env[name]]),
+    )
+    let session: AgentSession | undefined
+    const savedFetch = globalThis.fetch
+    let fetches = 0
+    try {
+      globalThis.fetch = Object.assign(async () => {
+        fetches++
+        throw new Error('The owned Pi recovery fixture refuses network fetches')
+      }, savedFetch)
+      events.length = 0
+      sent.length = 0
+      localRefresh.mockClear()
+      localProject.mockClear()
+      process.env.PI_OFFLINE = '1'
+      process.env.HOME = directory
+      process.env.PI_CODING_AGENT_DIR = agentDir
+      process.env.PI_AGENT_DIR = join(directory, 'decoy-extension-agent')
+      process.env.PI_ANTIGRAVITY_AUTH_FILE = join(
+        directory,
+        'plugin-accounts.json',
+      )
+      await mkdir(join(agentDir, 'extensions'), {
+        recursive: true,
+        mode: 0o700,
+      })
+      await mkdir(vaultDir, { recursive: true, mode: 0o700 })
+      await writeFile(
+        join(agentDir, 'settings.json'),
+        JSON.stringify({
+          defaultProvider: 'google',
+          defaultModel: 'antigravity-gemini-3.8-flash',
+        }),
+        { mode: 0o600 },
+      )
+      await lockout.prepare(home)
+      const nativeBefore = await readFile(home.authPath, 'utf8')
+      const stashBefore = await readFile(home.stashPath, 'utf8').catch(
+        () => undefined,
+      )
+      Reflect.set(globalThis, recoveryKey, { events })
+      const entry = fileURLToPath(new URL('./index.ts', import.meta.url))
+      await writeFile(
+        join(agentDir, 'extensions', 'observe.ts'),
+        `
+import { registerCortexKitPiAntigravity } from ${JSON.stringify(entry)}
+export default async function(pi) {
+  const fixture = Reflect.get(globalThis, Symbol.for('antigravity.pi.startup.recovery.fixture'))
+  if (!fixture) throw new Error('Owned recovery fixture missing')
+  // Record the order of real registrations without changing what Pi receives.
+  const observed = new Proxy(pi, {
+    get(target, name) {
+      const value = Reflect.get(target, name)
+      if (name === 'registerProvider' || name === 'registerCommand')
+        return (id, config) => {
+          fixture.events.push(name + ':' + id)
+          return value.call(target, id, config)
+        }
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  await registerCortexKitPiAntigravity(observed, {
+    vaultDir: ${JSON.stringify(vaultDir)}, modeFile: ${JSON.stringify(home.modeFile)},
+    rosterFile: ${JSON.stringify(join(vaultDir, 'roster.json'))},
+    nativeStashPath: ${JSON.stringify(home.stashPath)},
+    connect: async () => { throw new Error('Recovery opened a vault connection') },
+    connectEnrollment: async () => { throw new Error('Recovery opened an enrollment connection') },
+    readHostSlot: () => { throw new Error('Recovery read the native login') },
+  })
+  fixture.events.push('factory:end')
+}
+`,
+        { mode: 0o600 },
+      )
+      const created = await createAgentSession({
+        cwd: directory,
+        agentDir,
+        sessionManager: SessionManager.inMemory(directory),
+        noTools: 'all',
+      })
+      session = created.session
+      const loaded = [...events]
+      // Pi's own session start retries the synchronization; it still fails.
+      const hostErrors: Array<{ event?: string; error: string }> = []
+      await session.bindExtensions({
+        onError: (error) => {
+          hostErrors.push(error)
+        },
+      })
+      // One comparison so a failed load shows every consequence at once: the
+      // load error, the missing menu, and Pi's built-in Google catalog left
+      // active instead of the extension's refusing provider.
+      expect({
+        errors: created.extensionsResult.errors.map((error) => error.error),
+        commands: created.extensionsResult.extensions.flatMap((extension) => [
+          ...extension.commands.keys(),
+        ]),
+        registrations: loaded,
+        builtInGoogle: session.modelRuntime
+          .getModels('google')
+          .filter((model) => !model.id.startsWith('antigravity-'))
+          .map((model) => model.id),
+      }).toEqual({
+        errors: [],
+        commands: ['antigravity'],
+        registrations: [
+          'registerProvider:google',
+          'registerCommand:antigravity',
+          'factory:end',
+        ],
+        builtInGoogle: [],
+      })
+      // The host caught the failed session_start synchronization and reported
+      // it; the menu is still a registered command afterwards.
+      expect(
+        hostErrors.map((error) => ({
+          event: error.event,
+          reported: error.error.includes(lockout.reason),
+        })),
+      ).toEqual([{ event: 'session_start', reported: true }])
+      expect(session.extensionRunner.getCommand('antigravity')).toBeDefined()
+      expect(session.modelRuntime.getModels('google').length).toBeGreaterThan(0)
+      const model = session.modelRuntime.getModel(
+        'google',
+        'antigravity-gemini-3.8-flash',
+      )
+      if (!model) throw new Error('The real Pi runtime lost the google model')
+      const response = await session.modelRuntime
+        .streamSimple(model, {
+          messages: [
+            { role: 'user', content: 'recovery-owned-nonce', timestamp: 0 },
+          ],
+        })
+        .result()
+      expect(response.stopReason).toBe('error')
+      expect(response.errorMessage).toContain(lockout.refusal)
+      expect(sent).toHaveLength(0)
+      expect(fetches).toBe(0)
+      expect(localRefresh).not.toHaveBeenCalled()
+      expect(localProject).not.toHaveBeenCalled()
+      expect(await readFile(home.authPath, 'utf8')).toBe(nativeBefore)
+      expect(
+        await readFile(home.stashPath, 'utf8').catch(() => undefined),
+      ).toBe(stashBefore)
+    } finally {
+      try {
+        await session?.dispose()
+      } finally {
+        globalThis.fetch = savedFetch
+        Reflect.deleteProperty(globalThis, recoveryKey)
+        for (const [name, value] of previous) {
+          if (value === undefined) delete process.env[name]
+          else process.env[name] = value
+        }
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  })

@@ -185,6 +185,31 @@ function custodyProviderConfig(
 }
 
 /**
+ * Registered while the native credential slot cannot be synchronized with the
+ * chosen mode. It keeps the same provider id and models, so Pi neither falls
+ * back to its built-in Google catalog nor lists a second provider. It has no
+ * OAuth, so Pi never refreshes or rewrites the native login, and every request
+ * fails with the reason before anything is sent.
+ */
+function refusingProviderConfig(
+  models: NonNullable<ProviderConfig['models']>,
+  reason: string,
+): ProviderConfig {
+  return {
+    name: 'Google Antigravity (CortexKit, unavailable)',
+    baseUrl: 'https://cloudcode-pa.googleapis.com',
+    api: 'google-generative-ai',
+    models,
+    apiKey: CUSTODY_PROVIDER_KEY_MARKER,
+    streamSimple: createCortexKitAntigravityVaultStream(async () => {
+      throw new PiVaultSetupError(
+        `${reason} Resolve it from /antigravity; Antigravity requests are refused until then. No request was sent.`,
+      )
+    }, CUSTODY_PROVIDER_KEY_MARKER),
+  }
+}
+
+/**
  * The vault runtime Pi composes custody from: the public `./claustrum` entry
  * of `@cortexkit/common-auth`, the setup-only enrollment connection, and the
  * shared Antigravity vault account source for the `pi` host.
@@ -216,8 +241,11 @@ export async function registerCortexKitPiAntigravity(
     seams.readHostSlot ?? (() => readStoredCredential(ANTIGRAVITY_PROVIDER_ID))
   let refreshRegistry: (() => void) | undefined
   const vault = createPiVaultRuntime(readHostSlot, seams, async () => {
-    await synchronizeSlot()
-    refreshRegistry?.()
+    try {
+      await synchronizeSlot()
+    } finally {
+      refreshRegistry?.()
+    }
   })
   const send = createPiVaultSend(vault.requestPath)
 
@@ -260,7 +288,32 @@ export async function registerCortexKitPiAntigravity(
         'Vault enrollment excludes local login, refresh and request execution.',
       )
   }
-  const synchronizeSlot = async () => {
+  const synchronizeSlotOnce = async () => {
+    try {
+      await swapSlotForMode()
+    } catch (error) {
+      // Leave the provider registered but refusing, so a failed swap neither
+      // serves from the wrong credential nor unregisters the models.
+      pi.registerProvider(
+        ANTIGRAVITY_PROVIDER_ID,
+        refusingProviderConfig(
+          models,
+          error instanceof Error ? error.message : String(error),
+        ),
+      )
+      throw error
+    }
+  }
+  // Startup, session_start and every mode change synchronize the slot. Run them
+  // one at a time: each reads the mode when it starts, so the run that
+  // registers last is the one that read the newest mode.
+  let synchronizing: Promise<void> = Promise.resolve()
+  const synchronizeSlot = (): Promise<void> => {
+    const run = synchronizing.then(synchronizeSlotOnce)
+    synchronizing = run.catch(() => {})
+    return run
+  }
+  const swapSlotForMode = async () => {
     const mode = await currentMode()
     const { openPiSlot } = await (seams.loadPiSlot ?? loadCommonAuthPiSlot)()
     const slot = openPiSlot({
@@ -288,12 +341,17 @@ export async function registerCortexKitPiAntigravity(
   }
   // Pi's first catalog refresh reads auth.json to decide which models are usable.
   // Install the vault marker before the factory returns so discovery and the
-  // first request cannot refresh the dormant Google login.
-  await synchronizeSlot()
+  // first request cannot refresh the dormant Google login. A failed swap has
+  // registered the refusing provider; the factory still resolves so the
+  // /antigravity menu below, which holds the remedies, stays registered.
+  await synchronizeSlot().catch(() => {})
   pi.on?.('session_start', async (_event, context) => {
     refreshRegistry = () => context.modelRegistry.refresh()
-    await synchronizeSlot()
-    refreshRegistry()
+    try {
+      await synchronizeSlot()
+    } finally {
+      refreshRegistry()
+    }
   })
 
   const accounts = createPiVaultAccountsPort(vault.requestPath)
