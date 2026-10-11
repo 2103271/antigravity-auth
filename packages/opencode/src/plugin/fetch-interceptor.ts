@@ -115,6 +115,21 @@ export interface FetchInterceptor {
   dispose(): void | Promise<void>
 }
 
+/**
+ * The interceptor of this plugin's own accounts. The auth loader replaces it
+ * whenever it reloads the account pool, and retires the old one instead of
+ * disposing it, so requests it already admitted keep running.
+ */
+export interface LocalFetchInterceptor extends FetchInterceptor {
+  /**
+   * Refuses later Generative Language requests (they are never passed
+   * upstream) and resolves once every request that entered `fetch` before
+   * retirement, and its response body, has finished. `dispose` still aborts
+   * them.
+   */
+  retire(): Promise<void>
+}
+
 /** The local credential operations that differ between account sources. */
 type SourceCredentials = Pick<
   LocalRequestCredentials<ManagedAccount>,
@@ -247,7 +262,7 @@ function openCode1EngineCollaborators(
  */
 export function createFetchInterceptor(
   context: FetchInterceptorContext,
-): FetchInterceptor {
+): LocalFetchInterceptor {
   const {
     client,
     providerId,
@@ -318,6 +333,30 @@ export function createFetchInterceptor(
   })
   let disposed = false
   let disposePromise: Promise<void> | undefined
+  let retired = false
+  let retirePromise: Promise<void> | undefined
+  // Requests that entered `fetch` but have not yet reached the executor
+  // (they wait on admission or the host sign-in). Retirement waits for them
+  // so the executor admits them before it stops admitting; disposal waits
+  // for them so none resumes after it reports done.
+  const entering = new Set<Promise<unknown>>()
+
+  async function intercept(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    await context.assertAdmission?.()
+    // Disposal may have begun during the admission read; nothing more is
+    // read or sent for this request.
+    if (disposed) throw new Error('The local request runtime is disposed')
+    if (accountSource.kind === 'pool-file') {
+      const latestAuth = await getAuth()
+      if (disposed) throw new Error('The local request runtime is disposed')
+      if (!isOAuthAuth(latestAuth)) return upstreamFetch(input, init)
+    }
+
+    return executor.execute(input, init)
+  }
 
   async function fetch(
     input: RequestInfo | URL,
@@ -334,22 +373,42 @@ export function createFetchInterceptor(
       return upstreamFetch(input, init)
     }
 
-    await context.assertAdmission?.()
-    if (accountSource.kind === 'pool-file') {
-      const latestAuth = await getAuth()
-      if (!isOAuthAuth(latestAuth)) return upstreamFetch(input, init)
-    }
+    // A retired interceptor has been replaced; a request reaching it now is
+    // refused rather than sent without this plugin's credentials.
+    if (retired) throw new Error('The local request runtime is retired')
 
-    return executor.execute(input, init)
+    const pending = intercept(input, init)
+    entering.add(pending)
+    void pending.then(
+      () => entering.delete(pending),
+      () => entering.delete(pending),
+    )
+    return pending
+  }
+
+  function retire(): Promise<void> {
+    retired = true
+    retirePromise ??= (async () => {
+      while (entering.size > 0) await Promise.allSettled([...entering])
+      await executor.retire()
+    })()
+    return retirePromise
   }
 
   function dispose(): Promise<void> {
     disposed = true
-    disposePromise ??= executor.dispose()
+    disposePromise ??= (async () => {
+      await executor.dispose()
+      // Requests still reading their admission or the host sign-in stop at
+      // their next check; disposal reports done only once they have.
+      while (entering.size > 0) await Promise.allSettled([...entering])
+      // A retirement still waiting on those requests settles with them.
+      await retirePromise
+    })()
     return disposePromise
   }
 
-  return { fetch, dispose }
+  return { fetch, retire, dispose }
 }
 
 /**

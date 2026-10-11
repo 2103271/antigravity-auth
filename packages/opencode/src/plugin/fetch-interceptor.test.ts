@@ -484,6 +484,137 @@ describe('createFetchInterceptor', () => {
       expect(response).toBe(upstreamResponse)
       expect(upstreamFetch).toHaveBeenCalledTimes(1)
     })
+
+    it('final disposal waits for a request still reading its admission, which then sends nothing and reads no sign-in', async () => {
+      const upstreamFetch = mock(async () => new Response('upstream'))
+      let releaseAdmission: () => void = () => {}
+      const admissionHeld = new Promise<void>((resolve) => {
+        releaseAdmission = resolve
+      })
+      let markEntered: () => void = () => {}
+      const entered = new Promise<void>((resolve) => {
+        markEntered = resolve
+      })
+      const events: string[] = []
+      const base = await makeContext({ fetchImpl: upstreamFetch })
+      const interceptor = createFetchInterceptor({
+        ...base,
+        assertAdmission: async () => {
+          markEntered()
+          await admissionHeld
+          events.push('admission read returned')
+        },
+        getAuth: async () => {
+          events.push('host sign-in read')
+          return base.getAuth()
+        },
+      })
+      const outcome = interceptor.fetch(GENERATIVE_URL, GENERATIVE_INIT).then(
+        () => 'answered',
+        (error: unknown) => (error instanceof Error ? error.message : error),
+      )
+      try {
+        await entered
+        const disposal = Promise.resolve(interceptor.dispose()).then(() => {
+          events.push('disposal finished')
+        })
+        // Let a disposal that does not wait for the request finish first.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        releaseAdmission()
+        await disposal
+        expect({ outcome: await outcome, events }).toEqual({
+          outcome: 'The local request runtime is disposed',
+          events: ['admission read returned', 'disposal finished'],
+        })
+        expect(upstreamFetch).not.toHaveBeenCalled()
+        expect(transportMock).not.toHaveBeenCalled()
+      } finally {
+        releaseAdmission()
+        await interceptor.dispose()
+        await outcome
+        await base.accountManager.dispose()
+      }
+    })
+
+    it('retirement refuses later requests without passing them upstream, and finishes a request already admitted', async () => {
+      const upstreamFetch = mock(async () => new Response('upstream'))
+      let releaseAdmission: () => void = () => {}
+      const admissionHeld = new Promise<void>((resolve) => {
+        releaseAdmission = resolve
+      })
+      let markEntered: () => void = () => {}
+      const entered = new Promise<void>((resolve) => {
+        markEntered = resolve
+      })
+      let admissions = 0
+      transportHandler = async () =>
+        new Response(
+          JSON.stringify({
+            response: {
+              candidates: [
+                { content: { role: 'model', parts: [{ text: 'admitted' }] } },
+              ],
+            },
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        )
+      const context = await makeContext({
+        fetchImpl: upstreamFetch,
+        assertAdmission: async () => {
+          admissions += 1
+          if (admissions === 1) {
+            markEntered()
+            await admissionHeld
+          }
+        },
+      })
+      const interceptor = createFetchInterceptor(context)
+      const url = GENERATIVE_URL.replace(
+        ':streamGenerateContent?alt=sse',
+        ':generateContent',
+      )
+      const admitted = interceptor.fetch(url, GENERATIVE_INIT).then(
+        async (response) => ({
+          kind: 'response' as const,
+          status: response.status,
+          text: await response.text(),
+        }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      )
+      try {
+        await entered
+        let retired = false
+        const retirement = interceptor.retire()
+        void retirement.then(() => {
+          retired = true
+        })
+
+        const refused = await interceptor.fetch(url, GENERATIVE_INIT).then(
+          () => 'answered',
+          (error: unknown) => (error instanceof Error ? error.message : error),
+        )
+        expect(refused).toBe('The local request runtime is retired')
+        expect(upstreamFetch).not.toHaveBeenCalled()
+        expect(admissions).toBe(1)
+        expect(retired).toBe(false)
+
+        releaseAdmission()
+        expect(await admitted).toMatchObject({
+          kind: 'response',
+          status: 200,
+          text: expect.stringContaining('admitted'),
+        })
+        await retirement
+        expect(retired).toBe(true)
+        expect(transportMock).toHaveBeenCalledTimes(1)
+        expect(upstreamFetch).not.toHaveBeenCalled()
+      } finally {
+        releaseAdmission()
+        await interceptor.dispose()
+        await admitted
+        await context.accountManager.dispose()
+      }
+    })
   })
 
   describe('no-account 401 response', () => {

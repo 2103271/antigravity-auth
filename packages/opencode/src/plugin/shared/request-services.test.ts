@@ -8,6 +8,7 @@ import {
   type AgyTransportOptions,
   ANTIGRAVITY_ENDPOINT_FALLBACKS,
   AccountManager as CoreAccountManager,
+  type EnrollmentAuthority,
   HealthScoreTracker,
   type ManagedAccount,
   type OAuthAuthDetails,
@@ -15,10 +16,13 @@ import {
   TokenBucketTracker,
 } from '@cortexkit/antigravity-auth-core'
 import { extractAccountAccessErrorDetails } from '../account-access'
+import { createAuthLoader } from '../auth-loader'
 import { DEFAULT_CONFIG } from '../config'
 import { createLocationDebug } from '../debug'
 import { createGeminiDumpState } from '../gemini-dump'
+import { createPluginLifecycle } from '../lifecycle'
 import { createLocationLogger } from '../logger'
+import { createLocationProactiveRefreshQueue } from '../refresh-queue'
 import {
   buildThinkingWarmupBody,
   createRequestWire,
@@ -30,6 +34,7 @@ import {
 } from '../request'
 import { AgySessionRegistry } from '../session-context'
 import { createSignatureStore } from '../stores/signature-store'
+import type { GetAuth } from '../types'
 import {
   createRequestExecutor,
   type LocalRequestCredentials,
@@ -447,9 +452,12 @@ function storedAccounts(count: number): AccountStorageV4 {
 
 const managers: CoreAccountManager[] = []
 
-function makePool(count = 1): CoreAccountManager {
+function makePool(
+  count = 1,
+  store: AccountStorageStore = memoryStore(),
+): CoreAccountManager {
   const pool = new CoreAccountManager(undefined, storedAccounts(count), {
-    store: memoryStore(),
+    store,
     storagePath: join(testRoot(), 'memory-accounts.json'),
   })
   managers.push(pool)
@@ -1586,6 +1594,101 @@ describe('createRequestExecutor cancellation and overflow', () => {
     }
   })
 
+  it('retirement keeps an admitted send and its body, refuses new requests, and resolves after both finish', async () => {
+    let start: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      start = resolve
+    })
+    let respond: () => void = () => {}
+    const responded = new Promise<void>((resolve) => {
+      respond = resolve
+    })
+    const held = heldSse('retired-first', 'retired-last')
+    let physicalAborted = false
+    const h = harness({
+      respond: async (call) => {
+        call.options?.signal?.addEventListener('abort', () => {
+          physicalAborted = true
+        })
+        start()
+        await responded
+        return held.response
+      },
+    })
+    const executor = createRequestExecutor(h.deps)
+    const outcome = executor.execute(STREAM_URL, CHAT_INIT()).then(
+      (response) => ({ kind: 'response' as const, response }),
+      (error: unknown) => ({ kind: 'error' as const, error }),
+    )
+    try {
+      await started
+      let retired = false
+      const retirement = executor.retire()
+      void retirement.then(() => {
+        retired = true
+      })
+      // Observed rather than awaited: a request the retired executor wrongly
+      // admitted would wait on the held send below.
+      const refused = executor.execute(STREAM_URL, CHAT_INIT()).then(
+        () => 'sent',
+        (error: unknown) => (error instanceof Error ? error.message : error),
+      )
+
+      respond()
+      expect(await refused).toBe('The Antigravity request executor is retired')
+      const result = await outcome
+      if (result.kind !== 'response') throw result.error
+      expect(h.calls).toHaveLength(1)
+      const reader = result.response.body?.getReader()
+      if (!reader) throw new Error('The stream has no body')
+      expect(await readFirstEvent(reader)).toContain('retired-first')
+      expect(retired).toBe(false)
+      held.finish()
+      expect(await readRest(reader)).toContain('retired-last')
+      await retirement
+      expect(retired).toBe(true)
+      expect(physicalAborted).toBe(false)
+      expect(held.cancelled()).toBe(false)
+    } finally {
+      respond()
+      held.finish()
+      await executor.dispose()
+      await outcome
+    }
+  })
+
+  it('disposal after retirement aborts the retired body and ends the retirement', async () => {
+    const held = heldSse('retired-first', 'never-sent')
+    const h = harness({ respond: async () => held.response })
+    const executor = createRequestExecutor(h.deps)
+    try {
+      const response = await executor.execute(STREAM_URL, CHAT_INIT())
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('The stream has no body')
+      expect(await readFirstEvent(reader)).toContain('retired-first')
+      const nextRead = observeRead(reader)
+      let retired = false
+      const retirement = executor.retire()
+      void retirement.then(() => {
+        retired = true
+      })
+      await Promise.resolve()
+      expect(retired).toBe(false)
+
+      await executor.dispose()
+      expect(await nextRead).toMatchObject({
+        kind: 'error',
+        error: { message: 'The Antigravity request executor is disposed' },
+      })
+      await retirement
+      expect(retired).toBe(true)
+      expect(held.cancelled()).toBe(true)
+    } finally {
+      held.finish()
+      await executor.dispose()
+    }
+  })
+
   it('an authority transition preserves admitted physical work and refuses the next local request', async () => {
     const controller = new AbortController()
     let authority: 'local' | 'vault' = 'local'
@@ -1746,6 +1849,603 @@ describe('createRequestExecutor cancellation and overflow', () => {
       expect(h.refreshed).toHaveLength(0)
     } finally {
       await executor.dispose()
+    }
+  })
+})
+
+// =============================================================================
+// OpenCode 1 runtime replacement
+//
+// The auth loader replaces its local request runtime after an account is added,
+// on the first local requests after vault custody ends, and when the host runs
+// the loader again. These cases compose the real loader with the real request
+// executor over an owned account pool, so any abort they observe comes from the
+// executor's own cancellation, not from a fixture.
+// =============================================================================
+
+type ReadOutcome =
+  | { kind: 'chunk'; text: string }
+  | { kind: 'done' }
+  | { kind: 'error'; error: unknown }
+
+const sseDecoder = new TextDecoder()
+
+function sseEvent(text: string): string {
+  return `data: ${JSON.stringify({
+    response: {
+      candidates: [{ content: { role: 'model', parts: [{ text }] } }],
+    },
+  })}\n\n`
+}
+
+/** An upstream SSE body that sends its first event and holds until `finish`. */
+function heldSse(firstText: string, lastText: string) {
+  let output: ReadableStreamDefaultController<Uint8Array> | undefined
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      output = controller
+      controller.enqueue(new TextEncoder().encode(sseEvent(firstText)))
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  return {
+    response: new Response(body, {
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+    /** Whether the reader of this upstream body cancelled it. */
+    cancelled: () => cancelled,
+    finish() {
+      // A body the executor already cancelled refuses further events; the
+      // test then reports what the reader observed instead.
+      try {
+        output?.enqueue(new TextEncoder().encode(sseEvent(lastText)))
+        output?.close()
+      } catch {}
+    },
+  }
+}
+
+function completeSse(text: string): Response {
+  return new Response(sseEvent(text), {
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+function observeRead(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadOutcome> {
+  return reader.read().then(
+    (next): ReadOutcome =>
+      next.done
+        ? { kind: 'done' }
+        : { kind: 'chunk', text: sseDecoder.decode(next.value) },
+    (error: unknown): ReadOutcome => ({ kind: 'error', error }),
+  )
+}
+
+/**
+ * Reads the transformed stream through the end of its first SSE event, so
+ * the next read waits on the held upstream body.
+ */
+async function readFirstEvent(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<string> {
+  let text = ''
+  while (!text.endsWith('\n\n')) {
+    const next = await reader.read()
+    if (next.done) throw new Error(`The stream ended early after: ${text}`)
+    text += sseDecoder.decode(next.value)
+  }
+  return text
+}
+
+async function readRest(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<string> {
+  let text = ''
+  for (;;) {
+    const next = await reader.read()
+    if (next.done) return text
+    text += sseDecoder.decode(next.value)
+  }
+}
+
+function chatInit(text: string): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text }] }] }),
+  }
+}
+
+describe('OpenCode 1 runtime replacement with admitted streams', () => {
+  const provider = {
+    id: 'google',
+    name: 'Google',
+    source: 'custom',
+    env: [],
+    options: {},
+    models: {},
+  } as never
+  const getAuth = (async () => ({
+    type: 'oauth' as const,
+    refresh: 'refresh-0|project-0|managed-0',
+    access: 'access',
+    expires: 100,
+  })) as unknown as GetAuth
+
+  type LoadedFetch = (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => Promise<Response>
+
+  function runtimeLoader(options: {
+    respond: (call: TransportCall) => Promise<Response>
+    refresh?: (
+      auth: OAuthAuthDetails,
+      attempt: number,
+    ) => Promise<OAuthAuthDetails | undefined>
+    readAuthority?: () => Promise<EnrollmentAuthority>
+    beforeLoad?: (loadNumber: number) => Promise<void>
+  }) {
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      shutdownDiskSignatureCache: async () => {},
+      clearFetchState() {},
+    })
+    // Every loaded manager writes to one store, as the pool file is shared
+    // by every manager loaded from it; each save is recorded in order.
+    const store = memoryStore()
+    const saves: Array<{ load: number; refreshTokens: string[] }> = []
+    const events: string[] = []
+    // Settles when the manager of each load (1-based) has been disposed.
+    const disposed = new Map<number, Promise<void>>()
+    let loadNumber = 0
+    const loadAccountManager = mock(async () => {
+      loadNumber += 1
+      const load = loadNumber
+      await options.beforeLoad?.(load)
+      const pool = makePool(1, {
+        ...store,
+        saveMerged: async (path, next) => {
+          saves.push({
+            load,
+            refreshTokens: next.accounts.map((entry) => entry.refreshToken),
+          })
+          return store.saveMerged(path, next)
+        },
+      })
+      const dispose = pool.dispose.bind(pool)
+      let markDisposed: () => void = () => {}
+      disposed.set(
+        load,
+        new Promise<void>((resolve) => {
+          markDisposed = resolve
+        }),
+      )
+      pool.dispose = async () => {
+        await dispose()
+        events.push(`manager ${load} disposed`)
+        markDisposed()
+      }
+      return pool as never
+    })
+    const runtimes: CoreAccountManager[] = []
+    const loader = createAuthLoader({
+      publishSidebar: async () => {},
+      client: {
+        auth: { set: mock(async () => {}) },
+        tui: { showToast: mock(async () => {}) },
+      } as never,
+      providerId: 'google',
+      config: { ...DEFAULT_CONFIG, proactive_token_refresh: false },
+      lifecycle,
+      ...(options.readAuthority && {
+        readAuthority: options.readAuthority,
+        createVaultFetch: async () => ({
+          fetch: async () => new Response('vault-response'),
+          dispose() {},
+        }),
+      }),
+      createFetch: ({ accountManager }) => {
+        runtimes.push(accountManager)
+        const executor = createRequestExecutor(
+          harness({
+            pool: accountManager,
+            respond: options.respond,
+            ...(options.refresh && { refresh: options.refresh }),
+          }).deps,
+        )
+        return {
+          fetch: (input, init) => executor.execute(input, init),
+          retire: () => executor.retire(),
+          dispose: () => executor.dispose(),
+        }
+      },
+      dependencies: {
+        openAccountStore: async () =>
+          ({ status: 'initialization-required' }) as const,
+        loadAccounts: async () => null,
+        clearAccounts: async () => {},
+        loadAccountManager,
+      },
+    })
+    const load = async (): Promise<LoadedFetch> => {
+      const loaded = await loader(getAuth, provider)
+      if (!('fetch' in loaded) || typeof loaded.fetch !== 'function')
+        throw new Error('The loader returned no fetch')
+      return loaded.fetch as LoadedFetch
+    }
+    return {
+      lifecycle,
+      loader,
+      load,
+      loadAccountManager,
+      runtimes,
+      saves,
+      events,
+      disposed,
+    }
+  }
+
+  it('a reload keeps a stream admitted by the replaced runtime alive', async () => {
+    const held = heldSse('first-part', 'last-part')
+    let sends = 0
+    const { lifecycle, loader, load, runtimes, events, disposed } =
+      runtimeLoader({
+        respond: async () =>
+          sends++ === 0 ? held.response : completeSse('after-reload'),
+      })
+    try {
+      const fetch = await load()
+      const response = await fetch(STREAM_URL, chatInit('streaming'))
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('The stream has no body')
+      expect(await readFirstEvent(reader)).toContain('first-part')
+      let pendingRead: ReadOutcome | undefined
+      const nextRead = observeRead(reader)
+      void nextRead.then((outcome) => {
+        pendingRead = outcome
+      })
+
+      // What the OAuth add flow does once the new account is persisted.
+      await loader.reload(getAuth)
+      expect(runtimes).toHaveLength(2)
+      const fresh = await fetch(STREAM_URL, chatInit('after reload'))
+      expect(await fresh.text()).toContain('after-reload')
+      expect(sends).toBe(2)
+
+      // The replaced manager stays open while its admitted stream is held.
+      expect(pendingRead).toBeUndefined()
+      expect(events).toEqual([])
+      held.finish()
+      expect(await nextRead).toMatchObject({
+        kind: 'chunk',
+        text: expect.stringContaining('last-part'),
+      })
+      // The stream then ends normally; the engine closes it with a usage
+      // summary rather than an error.
+      const rest = await readRest(reader)
+      expect(rest).not.toContain('error')
+      expect(held.cancelled()).toBe(false)
+
+      // Only once that stream has finished is the replaced manager disposed;
+      // the live one is not.
+      await disposed.get(1)
+      expect(events).toEqual(['manager 1 disposed'])
+    } finally {
+      held.finish()
+      await lifecycle.dispose()
+    }
+    expect(events).toEqual(['manager 1 disposed', 'manager 2 disposed'])
+  })
+
+  it('a reload keeps a request admitted during its token refresh, then saves and sends the successor token', async () => {
+    let releaseRefresh: () => void = () => {}
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve
+    })
+    let markRefreshStarted: () => void = () => {}
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve
+    })
+    const sent: Array<{ prompt: string; authorization: string | null }> = []
+    const { lifecycle, loader, load, saves, events, disposed } = runtimeLoader({
+      refresh: async (auth, attempt) => {
+        if (attempt > 1)
+          return { ...auth, access: 'access-fresh', expires: FIXED_NOW * 2 }
+        markRefreshStarted()
+        await refreshHeld
+        return {
+          ...auth,
+          refresh: 'refresh-0-successor|project-0|managed-0',
+          access: 'access-successor',
+          expires: FIXED_NOW * 2,
+        }
+      },
+      respond: async (call) => {
+        sent.push({
+          prompt: String(call.init?.body).includes('during refresh')
+            ? 'during refresh'
+            : 'other',
+          authorization: new Headers(call.init?.headers).get('authorization'),
+        })
+        return completeSse('refreshed-answer')
+      },
+    })
+    try {
+      const fetch = await load()
+      const outcome = fetch(STREAM_URL, chatInit('during refresh')).then(
+        async (response) => ({
+          kind: 'response' as const,
+          text: await response.text(),
+        }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      )
+      await refreshStarted
+      await loader.reload(getAuth)
+      expect(events).toEqual([])
+
+      releaseRefresh()
+      expect(await outcome).toMatchObject({
+        kind: 'response',
+        text: expect.stringContaining('refreshed-answer'),
+      })
+      expect(sent).toEqual([
+        { prompt: 'during refresh', authorization: 'Bearer access-successor' },
+      ])
+      await disposed.get(1)
+      // The replaced manager saved the successor token of its admitted
+      // request before it was disposed.
+      expect(
+        saves.some(
+          (save) =>
+            save.load === 1 &&
+            save.refreshTokens.includes('refresh-0-successor'),
+        ),
+      ).toBe(true)
+      expect(events).toEqual(['manager 1 disposed'])
+    } finally {
+      releaseRefresh()
+      await lifecycle.dispose()
+    }
+  })
+
+  it('two concurrent first local requests after vault custody reload the local runtime once', async () => {
+    let authority: EnrollmentAuthority = 'vault'
+    const held = heldSse('first-request-part', 'first-request-last')
+    let releaseSecondLoad: () => void = () => {}
+    const secondLoad = new Promise<void>((resolve) => {
+      releaseSecondLoad = resolve
+    })
+    const { lifecycle, load, loadAccountManager, runtimes } = runtimeLoader({
+      readAuthority: async () => authority,
+      // A second load, if one happens, waits until the first request is
+      // streaming, so the run shows what a second install does to it.
+      beforeLoad: async (loadNumber) => {
+        if (loadNumber > 1) await secondLoad
+      },
+      respond: async (call) =>
+        String(call.init?.body).includes('first request')
+          ? held.response
+          : completeSse('second-request-answer'),
+    })
+    try {
+      const fetch = await load()
+      expect(
+        await (await fetch(STREAM_URL, chatInit('under vault'))).text(),
+      ).toBe('vault-response')
+
+      authority = 'local'
+      const first = fetch(STREAM_URL, chatInit('first request'))
+      const second = fetch(STREAM_URL, chatInit('second request')).then(
+        async (response) => ({
+          kind: 'response' as const,
+          text: await response.text(),
+        }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+      )
+      const response = await first
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('The stream has no body')
+      expect(await readFirstEvent(reader)).toContain('first-request-part')
+      let pendingRead: ReadOutcome | undefined
+      const nextRead = observeRead(reader)
+      void nextRead.then((outcome) => {
+        pendingRead = outcome
+      })
+
+      releaseSecondLoad()
+      expect(await second).toMatchObject({
+        kind: 'response',
+        text: expect.stringContaining('second-request-answer'),
+      })
+      const observed = {
+        loads: loadAccountManager.mock.calls.length,
+        runtimes: runtimes.length,
+        firstStream: pendingRead,
+      }
+      expect(observed).toEqual({
+        loads: 1,
+        runtimes: 1,
+        firstStream: undefined,
+      })
+      held.finish()
+      expect(await nextRead).toMatchObject({
+        kind: 'chunk',
+        text: expect.stringContaining('first-request-last'),
+      })
+    } finally {
+      releaseSecondLoad()
+      held.finish()
+      await lifecycle.dispose()
+    }
+  })
+
+  it('final shutdown aborts a stream still held by a replaced runtime and waits for it', async () => {
+    const held = heldSse('first-part', 'never-sent')
+    let sends = 0
+    const { lifecycle, loader, load, events } = runtimeLoader({
+      respond: async () =>
+        sends++ === 0 ? held.response : completeSse('after-reload'),
+    })
+    try {
+      const fetch = await load()
+      const response = await fetch(STREAM_URL, chatInit('streaming'))
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('The stream has no body')
+      expect(await readFirstEvent(reader)).toContain('first-part')
+      let pendingRead: ReadOutcome | undefined
+      const nextRead = observeRead(reader)
+      void nextRead.then((outcome) => {
+        pendingRead = outcome
+        events.push('stream settled')
+      })
+      await loader.reload(getAuth)
+      expect(pendingRead).toBeUndefined()
+      expect(held.cancelled()).toBe(false)
+
+      await lifecycle.dispose()
+      expect(pendingRead).toMatchObject({
+        kind: 'error',
+        error: { message: 'The Antigravity request executor is disposed' },
+      })
+      // Shutdown cancelled the physical upstream body and waited for the
+      // stream before disposing the manager it used, then the live one.
+      expect(held.cancelled()).toBe(true)
+      expect(events).toEqual([
+        'stream settled',
+        'manager 1 disposed',
+        'manager 2 disposed',
+      ])
+      await expect(
+        fetch(STREAM_URL, chatInit('after shutdown')),
+      ).rejects.toThrow('The account loader is disposed')
+      expect(sends).toBe(1)
+    } finally {
+      held.finish()
+      await lifecycle.dispose()
+    }
+  })
+
+  it('a replaced manager stays open until its refresh queue has finished an admitted proactive refresh', async () => {
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      shutdownDiskSignatureCache: async () => {},
+      clearFetchState() {},
+    })
+    const events: string[] = []
+    const store = memoryStore()
+    // A manager whose saves and disposal are recorded in `events`.
+    const recordedPool = (name: string) => {
+      const pool = makePool(1, {
+        ...store,
+        saveMerged: async (path, next) => {
+          events.push(
+            `${name} saved ${next.accounts.map((entry) => entry.refreshToken).join(',')}`,
+          )
+          return store.saveMerged(path, next)
+        },
+      })
+      const dispose = pool.dispose.bind(pool)
+      let markDisposed: () => void = () => {}
+      const disposed = new Promise<void>((resolve) => {
+        markDisposed = resolve
+      })
+      pool.dispose = async () => {
+        await dispose()
+        events.push(`${name} disposed`)
+        markDisposed()
+      }
+      return { pool, disposed }
+    }
+    const first = recordedPool('manager 1')
+    const second = recordedPool('manager 2')
+    // The account's token expires within the queue's refresh window.
+    const account = first.pool.getAccounts()[0]
+    if (!account) throw new Error('The pool has no account')
+    first.pool.updateFromAuth(account, {
+      ...first.pool.toAuthDetails(account),
+      access: 'access-expiring',
+      expires: Date.now() + 60_000,
+    })
+    let releaseRefresh: () => void = () => {}
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve
+    })
+    let markRefreshStarted: () => void = () => {}
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve
+    })
+    const queue = createLocationProactiveRefreshQueue(
+      {
+        logger: createLocationLogger({
+          sinkEnabled: () => false,
+        }).createLogger('proactive-refresh-test'),
+        refreshToken: async (auth) => {
+          markRefreshStarted()
+          await refreshHeld
+          return {
+            ...auth,
+            refresh: 'refresh-0-proactive|project-0|managed-0',
+            access: 'access-proactive',
+            expires: Date.now() + 3_600_000,
+          }
+        },
+      },
+      { enabled: true, bufferSeconds: 3600, checkIntervalSeconds: 0.001 },
+    )
+    queue.setAccountManager(first.pool)
+    const firstExecutor = createRequestExecutor(
+      harness({ pool: first.pool }).deps,
+    )
+    const secondExecutor = createRequestExecutor(
+      harness({ pool: second.pool }).deps,
+    )
+    let firstRetirement: Promise<void> | undefined
+    try {
+      expect(
+        await lifecycle.replaceAccountRuntime(first.pool as never, queue, {
+          retire: () => {
+            firstRetirement = firstExecutor.retire()
+            return firstRetirement
+          },
+          dispose: () => firstExecutor.dispose(),
+        }),
+      ).toBe(true)
+      queue.start()
+      await refreshStarted
+
+      // The replacement retires the first runtime, which has no admitted
+      // request, while its queue is still inside the proactive refresh.
+      const replaced = lifecycle.replaceAccountRuntime(
+        second.pool as never,
+        null,
+        {
+          retire: () => secondExecutor.retire(),
+          dispose: () => secondExecutor.dispose(),
+        },
+      )
+      await firstRetirement
+      // Let a manager disposal that followed the request retirement alone
+      // run before the refresh is released.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const beforeRelease = [...events]
+
+      releaseRefresh()
+      expect(await replaced).toBe(true)
+      await first.disposed
+      expect({ beforeRelease, events }).toEqual({
+        beforeRelease: [],
+        events: ['manager 1 saved refresh-0-proactive', 'manager 1 disposed'],
+      })
+    } finally {
+      releaseRefresh()
+      await queue.dispose()
+      await lifecycle.dispose()
     }
   })
 })

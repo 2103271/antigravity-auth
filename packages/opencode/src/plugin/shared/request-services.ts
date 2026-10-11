@@ -538,7 +538,18 @@ export interface AntigravityRequestExecutor {
     init?: RequestInit,
     options?: RequestExecuteOptions,
   ): Promise<Response>
-  /** Releases retry and warmup bookkeeping. */
+  /**
+   * Stops admitting requests without cancelling the ones already admitted:
+   * later `execute` calls reject, while admitted requests keep their retries
+   * and response bodies. Resolves once every admitted request and body has
+   * finished, then releases retry and warmup bookkeeping. A later `dispose`
+   * still aborts whatever is left.
+   */
+  retire(): Promise<void>
+  /**
+   * Aborts every admitted request and response body, waits for them to
+   * finish, then releases retry and warmup bookkeeping.
+   */
   dispose(): Promise<void>
 }
 
@@ -756,6 +767,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
   const shutdown = new AbortController()
   const inFlight = new Set<Promise<unknown>>()
   const bufferedOverflow = new WeakSet<Response>()
+  let retired = false
+  let drainPromise: Promise<void> | undefined
   let disposePromise: Promise<void> | undefined
 
   /** Reports a 401 served to an auxiliary send against its admission. */
@@ -2812,13 +2825,28 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     }
   }
 
-  function dispose(): Promise<void> {
-    disposePromise ??= (async () => {
-      shutdown.abort(new Error('The Antigravity request executor is disposed'))
+  // Waits for every admitted request and retained body, then releases the
+  // bookkeeping they use. Runs once, whether `retire` or `dispose` asks first.
+  function drain(): Promise<void> {
+    drainPromise ??= (async () => {
       // A refresh that already exchanged tokens must finish its owned store write.
       while (inFlight.size > 0) await Promise.allSettled([...inFlight])
       retryState.dispose()
       warmupState.dispose()
+    })()
+    return drainPromise
+  }
+
+  function retire(): Promise<void> {
+    retired = true
+    return drain()
+  }
+
+  function dispose(): Promise<void> {
+    disposePromise ??= (async () => {
+      retired = true
+      shutdown.abort(new Error('The Antigravity request executor is disposed'))
+      await drain()
     })()
     return disposePromise
   }
@@ -2828,6 +2856,10 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       if (shutdown.signal.aborted)
         return Promise.reject(
           new Error('The Antigravity request executor is disposed'),
+        )
+      if (retired)
+        return Promise.reject(
+          new Error('The Antigravity request executor is retired'),
         )
       const requestedSignal =
         init?.signal ?? (input instanceof Request ? input.signal : undefined)
@@ -2865,6 +2897,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       )
       return pending
     },
+    retire,
     dispose,
   }
 }

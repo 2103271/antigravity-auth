@@ -76,11 +76,20 @@ function createOwnedLifecycle() {
     clearFetchState() {},
   })
   const replace = lifecycle.replaceAccountRuntime.bind(lifecycle)
-  lifecycle.replaceAccountRuntime = async (manager, queue) => {
+  lifecycle.replaceAccountRuntime = async (manager, queue, requests) => {
     replacements.push({ manager, queue })
-    return replace(manager, queue)
+    return replace(manager, queue, requests)
   }
   return { lifecycle, replacements }
+}
+
+/** A promise with its resolver, for holding and observing one step. */
+function deferred<T = void>() {
+  let resolve: (value: T) => void = () => {}
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 /** A location with neither a pool file nor an account store yet. */
@@ -212,6 +221,7 @@ describe('createAuthLoader', () => {
     const { lifecycle, replacements } = createLifecycle()
     const createFetch = mock(() => ({
       fetch: mock(async () => new Response('ok')),
+      retire: mock(async () => {}),
       dispose: mock(async () => {}),
     }))
     const loader = createAuthLoader({
@@ -260,6 +270,7 @@ describe('createAuthLoader', () => {
     const { lifecycle } = createLifecycle()
     const createFetch = mock(() => ({
       fetch: mock(async () => new Response('ok')),
+      retire: mock(async () => {}),
       dispose: mock(async () => {}),
     }))
     const loader = createAuthLoader({
@@ -329,15 +340,24 @@ describe('createAuthLoader', () => {
       dispose: mock(async () => {}),
     }
     const managers = [firstManager, secondManager]
+    const firstManagerDisposed = deferred()
+    firstManager.dispose = mock(async () => {
+      firstManagerDisposed.resolve()
+    })
+    const firstRetired = deferred()
+    const firstRetire = mock(() => firstRetired.promise)
     const firstDispose = mock(async () => {})
+    const secondRetire = mock(async () => {})
     const secondDispose = mock(async () => {})
     const fetchRuntimes = [
       {
         fetch: mock(async () => new Response('first')),
+        retire: firstRetire,
         dispose: firstDispose,
       },
       {
         fetch: mock(async () => new Response('second')),
+        retire: secondRetire,
         dispose: secondDispose,
       },
     ]
@@ -376,26 +396,44 @@ describe('createAuthLoader', () => {
       expires: 100,
     }))
 
-    await loader(getAuth, provider)
-    await loader(getAuth, provider)
+    try {
+      await loader(getAuth, provider)
+      await loader(getAuth, provider)
 
-    expect(provider.models?.alpha?.cost).toMatchObject({ input: 0, output: 0 })
-    expect(provider.models?.beta?.cost).toMatchObject({ input: 0, output: 0 })
-    expect(lifecycle.getAccountManager()).toBe(
-      secondManager as unknown as AccountManager,
-    )
-    expect(firstManager.dispose).toHaveBeenCalledTimes(1)
-    expect(secondManager.dispose).not.toHaveBeenCalled()
-    expect(firstDispose).toHaveBeenCalledTimes(1)
-    expect(createFetch).toHaveBeenCalledWith({
-      accountManager: secondManager,
-      getAuth,
-      source: { kind: 'pool-file' },
-    })
+      expect(provider.models?.alpha?.cost).toMatchObject({
+        input: 0,
+        output: 0,
+      })
+      expect(provider.models?.beta?.cost).toMatchObject({
+        input: 0,
+        output: 0,
+      })
+      expect(lifecycle.getAccountManager()).toBe(
+        secondManager as unknown as AccountManager,
+      )
+      expect(createFetch).toHaveBeenCalledWith({
+        accountManager: secondManager,
+        getAuth,
+        source: { kind: 'pool-file' },
+      })
+      // The replaced runtime is retired, not aborted, and its manager stays
+      // open until that retirement finishes.
+      expect(firstRetire).toHaveBeenCalledTimes(1)
+      expect(firstDispose).not.toHaveBeenCalled()
+      expect(firstManager.dispose).not.toHaveBeenCalled()
+      firstRetired.resolve()
+      await firstManagerDisposed.promise
+      expect(firstManager.dispose).toHaveBeenCalledTimes(1)
+      expect(secondManager.dispose).not.toHaveBeenCalled()
 
-    await lifecycle.dispose()
-    expect(secondManager.dispose).toHaveBeenCalledTimes(1)
-    expect(secondDispose).toHaveBeenCalledTimes(1)
+      await lifecycle.dispose()
+      expect(secondManager.dispose).toHaveBeenCalledTimes(1)
+      expect(secondDispose).toHaveBeenCalledTimes(1)
+      expect(secondRetire).not.toHaveBeenCalled()
+    } finally {
+      firstRetired.resolve()
+      await lifecycle.dispose()
+    }
   })
 
   it('returned fetch delegates to the live runtime after reload()', async () => {
@@ -440,6 +478,7 @@ describe('createAuthLoader', () => {
       const isFirst = createFetch.mock.calls.length === 1
       return {
         fetch: isFirst ? firstFetch : secondFetch,
+        retire: mock(async () => {}),
         dispose: isFirst ? firstDispose : secondDispose,
       }
     })
@@ -494,6 +533,7 @@ describe('createAuthLoader', () => {
   it('exposes load on the handle so contract consumers can read it', () => {
     const createFetch = mock(() => ({
       fetch: mock(async () => new Response('ok')),
+      retire: mock(async () => {}),
       dispose: mock(async () => {}),
     }))
     const lifecycle = createPluginLifecycle({
@@ -520,12 +560,13 @@ describe('createAuthLoader', () => {
     expect(loader.load).toBe(loader)
   })
 
-  it('awaits prior runtime dispose before returning from reload()', async () => {
-    let disposeFinished = false
-    const firstDispose = mock(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10))
-      disposeFinished = true
-    })
+  it('returns from reload() without waiting for the replaced runtime to finish its admitted requests', async () => {
+    // The replaced runtime is retired: its admitted requests may run for
+    // minutes, so reload() must not wait for them, and must not abort them.
+    const firstRetired = deferred()
+    const firstRetire = mock(() => firstRetired.promise)
+    const firstDispose = mock(async () => {})
+    const firstManagerDisposed = deferred()
     const firstManager = {
       name: 'first',
       getAccountCount: () => 1,
@@ -540,7 +581,9 @@ describe('createAuthLoader', () => {
       ],
       requestSaveToDisk: mock(() => {}),
       getActiveIndexByFamily: () => ({ claude: 0, gemini: 0 }),
-      dispose: mock(async () => {}),
+      dispose: mock(async () => {
+        firstManagerDisposed.resolve()
+      }),
     }
     const secondManager = {
       name: 'second',
@@ -563,10 +606,12 @@ describe('createAuthLoader', () => {
     const fetchRuntimes = [
       {
         fetch: mock(async () => new Response('first')),
+        retire: firstRetire,
         dispose: firstDispose,
       },
       {
         fetch: mock(async () => new Response('second')),
+        retire: mock(async () => {}),
         dispose: secondDispose,
       },
     ]
@@ -599,22 +644,32 @@ describe('createAuthLoader', () => {
       expires: 100,
     })) as unknown as GetAuth
 
-    await loader(getAuth, {
-      id: 'g',
-      name: 'G',
-      source: 'custom',
-      env: [],
-      options: {},
-      models: {},
-    } as never)
+    try {
+      await loader(getAuth, {
+        id: 'g',
+        name: 'G',
+        source: 'custom',
+        env: [],
+        options: {},
+        models: {},
+      } as never)
 
-    const before = disposeFinished
-    const reloadPromise = loader.reload(getAuth)
-    // Without awaiting dispose, the reload promise returns before
-    // the previous runtime's dispose has settled.
-    expect(disposeFinished).toBe(before)
-    await reloadPromise
-    expect(disposeFinished).toBe(true)
+      await loader.reload(getAuth)
+      expect(firstRetire).toHaveBeenCalledTimes(1)
+      expect(firstDispose).not.toHaveBeenCalled()
+      expect(firstManager.dispose).not.toHaveBeenCalled()
+
+      firstRetired.resolve()
+      await firstManagerDisposed.promise
+      expect(firstManager.dispose).toHaveBeenCalledTimes(1)
+      expect(firstDispose).not.toHaveBeenCalled()
+      expect(secondManager.dispose).not.toHaveBeenCalled()
+    } finally {
+      firstRetired.resolve()
+      await lifecycle.dispose()
+    }
+    expect(secondDispose).toHaveBeenCalledTimes(1)
+    expect(secondManager.dispose).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -672,7 +727,11 @@ describe('createAuthLoader on the account store', () => {
         lifecycle,
         createFetch: ({ accountManager }) => {
           managers.push(accountManager)
-          return { fetch: mock(async () => new Response('ok')), dispose() {} }
+          return {
+            fetch: mock(async () => new Response('ok')),
+            async retire() {},
+            dispose() {},
+          }
         },
         dependencies: {
           openAccountStore: open,
@@ -748,7 +807,11 @@ describe('createAuthLoader on the account store', () => {
           if (accountManager instanceof CoreAccountManager) {
             managers.push(accountManager)
           }
-          return { fetch: mock(async () => new Response('ok')), dispose() {} }
+          return {
+            fetch: mock(async () => new Response('ok')),
+            async retire() {},
+            dispose() {},
+          }
         },
         dependencies: {
           openAccountStore: open,
@@ -810,6 +873,7 @@ describe('createAuthLoader on the account store', () => {
         lifecycle,
         createFetch: () => ({
           fetch: mock(async () => new Response()),
+          async retire() {},
           dispose() {},
         }),
         dependencies: {
@@ -854,6 +918,7 @@ describe('createAuthLoader on the account store', () => {
           lifecycle: createLifecycle().lifecycle,
           createFetch: () => ({
             fetch: mock(async () => new Response()),
+            async retire() {},
             dispose() {},
           }),
           dependencies: {
@@ -893,6 +958,7 @@ describe('createAuthLoader on the account store', () => {
         lifecycle,
         createFetch: () => ({
           fetch: mock(async () => new Response()),
+          async retire() {},
           dispose() {},
         }),
         dependencies: { openAccountStore: open, clearAccounts },
@@ -919,6 +985,7 @@ describe('createAuthLoader on the account store', () => {
       lifecycle,
       createFetch: () => ({
         fetch: mock(async () => new Response()),
+        async retire() {},
         dispose() {},
       }),
       dependencies: {
@@ -962,6 +1029,7 @@ describe('createAuthLoader on the account store', () => {
       lifecycle,
       createFetch: () => ({
         fetch: mock(async () => new Response()),
+        async retire() {},
         dispose() {},
       }),
       dependencies: {
@@ -1034,6 +1102,173 @@ describe('enrollment authority at loader and request start', () => {
       expect(localAuth).not.toHaveBeenCalled()
       expect(localOpen).not.toHaveBeenCalled()
     } finally {
+      await lifecycle.dispose()
+    }
+  })
+
+  it('builds and sends no vault runtime when the loader is disposed during the request authority read', async () => {
+    const events: string[] = []
+    let heldAuthority: Promise<EnrollmentAuthority> | null = null
+    let releaseAuthority: (authority: EnrollmentAuthority) => void = () => {}
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      clearFetchState() {},
+      shutdownDiskSignatureCache: async () => {},
+    })
+    const loader = createAuthLoader({
+      client: {} as never,
+      providerId: 'google',
+      config: {} as never,
+      lifecycle,
+      readAuthority: () => heldAuthority ?? Promise.resolve('vault'),
+      createFetch: () => {
+        throw new Error('local interceptor was constructed')
+      },
+      createVaultFetch: async () => {
+        events.push('vault runtime built')
+        return {
+          fetch: async () => {
+            events.push('vault send')
+            return new Response('vault-after-dispose')
+          },
+          dispose() {
+            events.push('vault runtime disposed')
+          },
+        }
+      },
+      dependencies: {
+        openAccountStore: async () => {
+          throw new Error('local store was touched')
+        },
+      },
+    })
+    try {
+      const loaded = await loader(
+        mock(async () => {
+          throw new Error('native login was touched')
+        }),
+        { models: {} } as never,
+      )
+      if (typeof loaded.fetch !== 'function')
+        throw new Error('no fetch runtime')
+      heldAuthority = new Promise<EnrollmentAuthority>((resolve) => {
+        releaseAuthority = resolve
+      })
+      const outcome = loaded
+        .fetch('https://generativelanguage.googleapis.com/example')
+        .then(
+          async (response: Response) => ({
+            kind: 'response' as const,
+            text: await response.text(),
+          }),
+          (error: unknown) => ({
+            kind: 'error' as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+      await lifecycle.dispose()
+      events.push('lifecycle disposed')
+      releaseAuthority('vault')
+      expect({ outcome: await outcome, events }).toEqual({
+        outcome: { kind: 'error', message: 'The account loader is disposed' },
+        events: ['lifecycle disposed'],
+      })
+    } finally {
+      releaseAuthority('vault')
+      await lifecycle.dispose()
+    }
+  })
+
+  it('sends nothing on a vault runtime whose construction finishes after loader disposal began, and disposes it', async () => {
+    const events: string[] = []
+    const construction = deferred()
+    let markConstructing: () => void = () => {}
+    const constructing = new Promise<void>((resolve) => {
+      markConstructing = resolve
+    })
+    let markProducersStarting: () => void = () => {}
+    const producersStarting = new Promise<void>((resolve) => {
+      markProducersStarting = resolve
+    })
+    const lifecycle = createPluginLifecycle({
+      sessionRegistry: { clear() {} },
+      // The lifecycle clears fetch state immediately before it disposes its
+      // producers, the loader first among them.
+      clearFetchState() {
+        markProducersStarting()
+      },
+      shutdownDiskSignatureCache: async () => {},
+    })
+    const loader = createAuthLoader({
+      client: {} as never,
+      providerId: 'google',
+      config: {} as never,
+      lifecycle,
+      readAuthority: async () => 'vault',
+      createFetch: () => {
+        throw new Error('local interceptor was constructed')
+      },
+      createVaultFetch: async () => {
+        events.push('vault runtime construction started')
+        markConstructing()
+        await construction.promise
+        events.push('vault runtime built')
+        return {
+          fetch: async () => {
+            events.push('vault send')
+            return new Response('vault-after-dispose')
+          },
+          dispose() {
+            events.push('vault runtime disposed')
+          },
+        }
+      },
+      dependencies: {
+        openAccountStore: async () => {
+          throw new Error('local store was touched')
+        },
+      },
+    })
+    try {
+      const loaded = await loader(
+        mock(async () => {
+          throw new Error('native login was touched')
+        }),
+        { models: {} } as never,
+      )
+      if (typeof loaded.fetch !== 'function')
+        throw new Error('no fetch runtime')
+      const outcome = loaded
+        .fetch('https://generativelanguage.googleapis.com/example')
+        .then(
+          async (response: Response) => ({
+            kind: 'response' as const,
+            text: await response.text(),
+          }),
+          (error: unknown) => ({
+            kind: 'error' as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        )
+      await constructing
+      // The loader's disposal waits for the runtime under construction so it
+      // can close it; construction finishes once that disposal has begun.
+      const disposal = lifecycle.dispose()
+      await producersStarting
+      construction.resolve()
+      await disposal
+      events.push('lifecycle disposed')
+      expect({ outcome: await outcome, events }).toEqual({
+        outcome: { kind: 'error', message: 'The account loader is disposed' },
+        events: [
+          'vault runtime construction started',
+          'vault runtime built',
+          'vault runtime disposed',
+          'lifecycle disposed',
+        ],
+      })
+    } finally {
+      construction.resolve()
       await lifecycle.dispose()
     }
   })

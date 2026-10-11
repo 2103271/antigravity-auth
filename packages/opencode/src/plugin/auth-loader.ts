@@ -70,6 +70,17 @@ export interface AuthFetchRuntime {
 }
 
 /**
+ * The runtime of this plugin's own accounts. A reload retires the runtime it
+ * replaces instead of disposing it: requests it already admitted keep
+ * running on the account manager they started with, and that manager is
+ * disposed only after they finish.
+ */
+export interface LocalFetchRuntime extends AuthFetchRuntime {
+  /** Refuses new requests; resolves once admitted requests have finished. */
+  retire(): Promise<void>
+}
+
+/**
  * The account manager request routing uses for this plugin's account pool:
  * the pool-file manager until that pool is migrated to the account store,
  * then the core manager whose accounts come from the store's repository.
@@ -93,7 +104,7 @@ export type CreateAuthFetch = (input: {
           { status: 'ready' }
         >['repository']
       }
-}) => AuthFetchRuntime
+}) => LocalFetchRuntime
 
 /**
  * Loader returned by `createAuthLoader`. The function loads the
@@ -255,15 +266,19 @@ export function createAuthLoader({
     return openStore()
   }
   let closed = false
-  let fetchRuntime: AuthFetchRuntime | null = null
+  let fetchRuntime: LocalFetchRuntime | null = null
   let vaultFetchRuntime: Promise<AuthFetchRuntime> | null = null
   let currentRequestSource: EnrollmentAuthority | undefined
   let latestGetAuth: GetAuth | undefined
+  // The reload started by the first local request after vault custody (or
+  // before any local runtime exists). Concurrent requests join it instead of
+  // each installing a runtime of their own.
+  let localRequestReload: Promise<void> | null = null
   // Reload chain — `installRuntime` swaps the fetch runtime and
-  // overlapping reloads must not interleave teardown. Serialize
+  // overlapping reloads must not interleave the swap. Serialize
   // reloads through a single shared promise so each new install waits
-  // for the previous one to fully settle (including its dispose)
-  // before tearing down the runtime it depends on.
+  // for the previous one to settle before replacing the runtime it
+  // installed.
   let reloadChain: Promise<void> = Promise.resolve()
 
   lifecycle.register(
@@ -271,9 +286,9 @@ export function createAuthLoader({
       async dispose() {
         closed = true
         await reloadChain
-        const runtime = fetchRuntime
+        // Every local runtime was handed to the lifecycle, which aborts and
+        // drains it (and every retired one) before disposing their managers.
         fetchRuntime = null
-        await runtime?.dispose()
         await (await vaultFetchRuntime?.catch(() => null))?.dispose()
         vaultFetchRuntime = null
       },
@@ -344,26 +359,19 @@ export function createAuthLoader({
       }
     }
 
-    if (
-      !(await lifecycle.replaceAccountRuntime(accountManager, refreshQueue))
-    ) {
-      throw new Error('The account loader is disposed')
-    }
-    refreshQueue?.start()
-
-    // Swap the fetch runtime FIRST so the host's captured fetch
-    // reference (a call-time delegating wrapper below) immediately
-    // routes through the new interceptor, then await the previous
-    // runtime's dispose. The swap-then-dispose order guarantees there
-    // is no fetch gap between the old and new runtimes.
-    const previousRuntime = fetchRuntime
     // A store-backed manager was loaded from this plugin's single store
     // opening; its fetch checks every send against that same repository.
     const opening = source === 'store' ? await openStore() : undefined
-    if (opening !== undefined && opening.status !== 'ready') {
-      throw new Error('the account store closed while it was in use')
+    if (closed || (opening !== undefined && opening.status !== 'ready')) {
+      await refreshQueue?.dispose()
+      await accountManager.dispose()
+      throw new Error(
+        closed
+          ? 'The account loader is disposed'
+          : 'the account store closed while it was in use',
+      )
     }
-    fetchRuntime = createFetch({
+    const nextRuntime = createFetch({
       accountManager,
       getAuth,
       source:
@@ -371,7 +379,39 @@ export function createAuthLoader({
           ? { kind: 'pool-file' }
           : { kind: 'store', repository: opening.repository },
     })
-    await previousRuntime?.dispose()
+
+    // Route new requests to the new runtime FIRST, so the host's captured
+    // fetch (a call-time delegating wrapper below) never reaches a runtime
+    // after it is retired. The lifecycle then retires the previous runtime:
+    // it refuses new requests but finishes the ones it already admitted, and
+    // its account manager is disposed only after they have finished.
+    fetchRuntime = nextRuntime
+    let published: boolean
+    try {
+      published = await lifecycle.replaceAccountRuntime(
+        accountManager,
+        refreshQueue,
+        {
+          retire: () => nextRuntime.retire(),
+          // The lifecycle disposes a request runtime only while it is itself
+          // disposing; stop admitting requests before their runtime aborts.
+          dispose: async () => {
+            closed = true
+            await nextRuntime.dispose()
+          },
+        },
+      )
+    } catch (error) {
+      // Nothing owns the new runtime when it was not published; close it
+      // and leave no runtime to route to, rather than an untracked one.
+      if (fetchRuntime === nextRuntime) fetchRuntime = null
+      await nextRuntime.dispose()
+      await refreshQueue?.dispose()
+      await accountManager.dispose()
+      throw error
+    }
+    if (!published) throw new Error('The account loader is disposed')
+    refreshQueue?.start()
 
     // Push the freshly materialized account pool into the sidebar so the
     // TUI's next poll renders the labels / health / cooldown it needs
@@ -561,6 +601,9 @@ export function createAuthLoader({
       fetch: async (input, init) => {
         if (closed) throw new Error('The account loader is disposed')
         const authority = (await readAuthority?.()) ?? 'local'
+        // Disposal may have finished while the authority was read; nothing
+        // is built or sent after it.
+        if (closed) throw new Error('The account loader is disposed')
         if (authority === 'unreadable') throw new Error(VAULT_ACCOUNT_REMEDY)
         if (authority === 'vault') {
           currentRequestSource = 'vault'
@@ -569,18 +612,31 @@ export function createAuthLoader({
             vaultFetchRuntime = null
             throw error
           })
-          return (await vaultFetchRuntime).fetch(input, init)
+          const vaultRuntime = await vaultFetchRuntime
+          if (closed) throw new Error('The account loader is disposed')
+          return vaultRuntime.fetch(input, init)
         }
         if (
           readAuthority &&
-          (currentRequestSource !== 'local' || !fetchRuntime)
+          (localRequestReload ||
+            currentRequestSource !== 'local' ||
+            !fetchRuntime)
         ) {
           if (!latestGetAuth)
             throw new Error('The host sign-in reader is unavailable')
-          await reload(latestGetAuth)
+          // Requests arriving together share one reload, so a later one
+          // never replaces the runtime an earlier one is already sending on.
+          if (!localRequestReload) {
+            const started = reload(latestGetAuth).finally(() => {
+              if (localRequestReload === started) localRequestReload = null
+            })
+            localRequestReload = started
+          }
+          await localRequestReload
           if (closed) throw new Error('The account loader is disposed')
           if ((await readAuthority()) !== 'local')
             throw new Error(VAULT_ACCOUNT_REMEDY)
+          if (closed) throw new Error('The account loader is disposed')
         }
         if (currentRequestSource !== 'local' || !fetchRuntime)
           throw new Error('The local account runtime is unavailable')
