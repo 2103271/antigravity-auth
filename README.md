@@ -138,7 +138,7 @@ The published v2.2.1 default is `true`; its update check on host restart can adv
 
 Offline rollback exports **current credentials and metadata** from the active store generation into legacy V4 JSON, rather than restoring tokens from the original backup. It refuses an existing/recreated legacy file, a changed rollback snapshot, or credentials/metadata changed during rollback. Do not copy an old snapshot back or recreate the legacy pool. On a refusal, leave hosts stopped and resolve the reported conflict.
 
-Migration and rollback manage the **local OpenCode pool**, not the host's native Google auth slot used to activate the provider, or approved credentials held by the vault. Disconnect vault enrollment through the current adapter before changing builds; re-login if native credentials cannot be safely restored. Do not assume all native host records will be restored. Pi's native auth file is not the OpenCode pool: **Pi-only users must not run these migration commands on it**. For Pi, change old `google-antigravity/…` model selections to `google/…` and run `/login google`; old credential slots are not automatically moved or overwritten.
+Migration and rollback manage the **local OpenCode pool**, not the host's native Google auth slot used to activate the provider, or approved credentials held by the vault. Before changing builds, disconnect vault enrollment via `/antigravity` → Vault in the currently installed plugin or extension; re-login if native credentials cannot be safely restored. Do not assume all native host records will be restored. Pi's native auth file is not the OpenCode pool: **Pi-only users must not run these migration commands on it**. For Pi, change old `google-antigravity/…` model selections to `google/…` and run `/login google`; old credential slots are not automatically moved or overwritten.
 
 The exact CLI options and stopped-process confirmation are in [`packages/opencode/src/cli.ts`](packages/opencode/src/cli.ts); current-credential export and refusal checks are in [`packages/core/src/account-migration.ts`](packages/core/src/account-migration.ts).
 
@@ -182,7 +182,7 @@ Legacy `antigravity-gemini-3-flash` style aliases resolve through `MODEL_ALIASES
 
 ## Multi-account behavior
 
-In local mode, OpenCode V1 and GA share the account repository at the resolved account path; projects do not create independent pools. After initialization/migration, a published pointer selects the active generation's `config.json` and `state.json`. Legacy `antigravity-accounts.json` is an import/export format, not the active writer target. Each local account carries:
+In local mode, OpenCode V1 and GA share the account repository at the resolved account path; projects do not create independent pools. After initialization/migration, a pointer file records the active store directory containing `config.json` and `state.json`. Legacy `antigravity-accounts.json` is an import/export format, not the active writer target. Each local account carries:
 
 - `refreshToken` (stored in plaintext in owner-only files/directories — filesystem permissions are not encryption)
 - `email`, `enabled`, `coolingDownUntil`, `cachedQuota`, `healthScore`
@@ -203,7 +203,7 @@ Account selection (`account_selection_strategy`):
 
 ### Local authority and vault custody
 
-Use `/antigravity` → Vault to request access, select approved vault accounts, or return to local mode. **Local** authority uses the initialized/migrated local repository. **Vault custody** uses vault request credentials and excludes the local pool; unavailable enrollment or vault data does not permit a local fallback. V1 vault serving checks enrollment once the host reaches `auth.loader`; dormant native Google logins and placeholder records not owned by the current enrollment remain unchanged and do not block vault requests. Explicit V1 provider activation is separate and refuses an occupied native slot. GA serving requires its owned native Google connection, while Pi serving requires its owned non-secret Google-slot marker. Do not hand-edit mode files or copy credentials to bypass a refusal. See [`vault-custody.ts`](packages/opencode/src/plugin/vault-custody.ts), [`auth-loader.ts`](packages/opencode/src/plugin/auth-loader.ts), and [`vault-activation.ts`](packages/opencode/src/plugin/vault-activation.ts).
+Use `/antigravity` → Vault to request access, select approved vault accounts, or return to local mode. **Local** authority uses the initialized/migrated local repository. **Vault custody** uses vault request credentials and excludes the local pool; unavailable enrollment or vault data does not permit a local fallback. OpenCode 1 needs a saved Google auth entry to load the provider. Once loaded, approved enrollment supplies vault credentials without reading or validating that entry's contents: existing ordinary Google logins and placeholder records from other enrollments remain unchanged. Explicit fresh provider activation refuses to overwrite an occupied Google auth slot. GA vault serving requires the native Google connection created for that enrollment; Pi requires the non-secret Google-slot marker created for that enrollment. Do not hand-edit mode files or copy credentials to bypass a refusal. See [`vault-custody.ts`](packages/opencode/src/plugin/vault-custody.ts), [`auth-loader.ts`](packages/opencode/src/plugin/auth-loader.ts), and [`vault-activation.ts`](packages/opencode/src/plugin/vault-activation.ts).
 
 ## Quota semantics and killswitch
 
@@ -253,7 +253,7 @@ Every writer follows the same recipe (serialize through `sidebarWriteChain` → 
 
 ## Standalone CLI
 
-`antigravity-auth` (the bin inside the unified OpenCode package) accepts these commands, plus `--help`. The parser rejects unsupported commands/options with `exit 2`.
+`antigravity-auth` (the bin inside `@cortexkit/opencode-antigravity-auth`) accepts these commands, plus `--help`. The parser rejects unsupported commands/options with `exit 2`.
 
 ```bash
 antigravity-auth login [--project <id>] [--no-browser]

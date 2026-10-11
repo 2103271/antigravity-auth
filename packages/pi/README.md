@@ -84,11 +84,11 @@ old `google-antigravity` provider, update model IDs to `google/antigravity-…` 
 run `/login google`: credentials in the `google-antigravity` auth slot are not
 automatically moved or overwritten.
 
-Before changing builds while enrolled in a vault, use `/antigravity` to disconnect
-with the current extension, then re-login if safe native-slot restoration is not
-possible. An older build may expect a different provider slot; do not copy tokens
-between slots or assume disconnect restores all native records. If you also use
-an OpenCode legacy pool, follow its separate
+Before changing builds while enrolled in a vault, disconnect via `/antigravity` →
+Vault in the currently installed extension, then re-login if safe native-slot
+restoration is not possible. An older build may expect a different provider slot;
+do not copy tokens between slots or assume disconnect restores all native records.
+If you also use an OpenCode legacy pool, follow its separate
 [offline migration/rollback guide](../../README.md#major-upgrades-migration-and-rollback).
 The provider and custody behavior is implemented in [`src/index.ts`](src/index.ts)
 and [`src/vault-setup.ts`](src/vault-setup.ts).

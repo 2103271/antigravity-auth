@@ -27,8 +27,8 @@ Provides:
 
 OpenCode V1 and GA use the same local store when they resolve the same account
 path. Pi local mode instead uses Pi's native `google` OAuth slot, not the OpenCode
-pool; Pi vault mode selects one approved vault account at a time. Both adapters expose models
-under the `google` provider.
+pool; Pi vault mode selects one account approved by the vault operator at a time.
+Both adapters expose models under the `google` provider.
 
 For a major upgrade, stop every OpenCode/Antigravity process and timer before
 `antigravity-auth migrate --offline`. Fresh local pools use `antigravity-auth init`.
