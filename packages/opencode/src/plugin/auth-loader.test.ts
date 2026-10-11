@@ -1,12 +1,20 @@
 import { describe, expect, it, mock } from 'bun:test'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   type AccountTokenExchange,
   AccountManager as CoreAccountManager,
   createAccountRepositoryFactory,
+  type EnrollmentAuthority,
   initializeFreshAccountStore,
+  loadCommonAuthClaustrum,
   loadCommonAuthStoreModules,
 } from '@cortexkit/antigravity-auth-core'
 
@@ -21,6 +29,7 @@ import {
 } from './refresh-queue'
 import { type AccountStorageV4, openAccountStore } from './storage'
 import type { GetAuth, Provider } from './types'
+import { createV1VaultActivationMethod } from './vault-activation'
 
 function storedAccounts(): AccountStorageV4 {
   return {
@@ -79,6 +88,109 @@ const poolFileOnly = async () =>
   ({ status: 'initialization-required' }) as const
 
 describe('createAuthLoader', () => {
+  it('serves a fresh vault activation without reading native auth, then refuses its marker after disconnect without touching local files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'v1-vault-roundtrip-'))
+    const nativeFile = join(root, 'auth.json')
+    const localFile = join(root, 'accounts.json')
+    const localBytes = JSON.stringify(storedAccounts())
+    writeFileSync(localFile, localBytes)
+    let authority: EnrollmentAuthority = 'vault'
+    let nativeReads = 0
+    const { lifecycle } = createLifecycle()
+    const openStore = mock(async () => {
+      throw new Error('Local store must stay unopened')
+    })
+    const loadAccounts = mock(async () => {
+      throw new Error('Legacy pool must stay unread')
+    })
+    const clearAccounts = mock(async () => {})
+    const authSet = mock(async () => {})
+    const vaultSend = mock(async () => new Response('synthetic-vault-response'))
+    const loader = createAuthLoader({
+      client: {
+        auth: { set: authSet },
+        tui: { showToast: mock(async () => {}) },
+      } as never,
+      providerId: 'google',
+      config: { ...DEFAULT_CONFIG, proactive_token_refresh: false },
+      lifecycle,
+      readAuthority: async () => authority,
+      createFetch: () => {
+        throw new Error('No local executor should be constructed')
+      },
+      createVaultFetch: async () => ({
+        fetch: vaultSend,
+        dispose: async () => {},
+      }),
+      dependencies: {
+        openAccountStore: openStore,
+        loadAccounts,
+        clearAccounts,
+      },
+    })
+    try {
+      const method = createV1VaultActivationMethod({
+        providerId: 'google',
+        readAuthority: async () => authority,
+        authFile: () => nativeFile,
+      })
+      if (method.type !== 'oauth') throw new Error('Expected OAuth envelope')
+      const activation = await method.authorize()
+      if (activation.method !== 'auto')
+        throw new Error('Expected automatic activation')
+      const answer = await activation.callback()
+      expect(answer.type).toBe('success')
+      const claustrum = await loadCommonAuthClaustrum()
+      expect(answer).toEqual({
+        ...claustrum.custodyPlaceholder('google'),
+        type: 'success',
+      })
+      // Model the host's persistence of the callback result in an owned file;
+      // this test does not claim to execute OpenCode's native auth UI.
+      writeFileSync(
+        nativeFile,
+        JSON.stringify({ google: claustrum.custodyPlaceholder('google') }),
+      )
+      const nativeBytes = readFileSync(nativeFile, 'utf8')
+      const getAuth: GetAuth = async () => {
+        nativeReads++
+        return claustrum.custodyPlaceholder('google')
+      }
+      const result = await loader(getAuth, {
+        id: 'google',
+        name: 'Google',
+        source: 'custom',
+        env: [],
+        options: {},
+        models: {},
+      } as never)
+      if (!('fetch' in result) || typeof result.fetch !== 'function')
+        throw new Error('No vault fetch returned')
+      expect(
+        await (
+          await result.fetch(
+            'https://generativelanguage.googleapis.com/synthetic',
+          )
+        ).text(),
+      ).toBe('synthetic-vault-response')
+      expect(nativeReads).toBe(0)
+      expect(vaultSend).toHaveBeenCalledTimes(1)
+      authority = 'local'
+      await expect(
+        result.fetch('https://generativelanguage.googleapis.com/synthetic'),
+      ).rejects.toThrow('sign in')
+      expect(vaultSend).toHaveBeenCalledTimes(1)
+      expect(openStore).not.toHaveBeenCalled()
+      expect(loadAccounts).not.toHaveBeenCalled()
+      expect(clearAccounts).not.toHaveBeenCalled()
+      expect(authSet).not.toHaveBeenCalled()
+      expect(readFileSync(nativeFile, 'utf8')).toBe(nativeBytes)
+      expect(readFileSync(localFile, 'utf8')).toBe(localBytes)
+    } finally {
+      await lifecycle.dispose()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
   it('restores auth drift from storage before creating the account runtime', async () => {
     const authSet = mock(async () => {})
     const clearAccounts = mock(async () => {})

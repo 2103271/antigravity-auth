@@ -108,6 +108,7 @@ import {
   mutateAccountStorage,
 } from './storage'
 import type { GetAuth, PluginContext, PluginInput, PluginResult } from './types'
+import { createV1VaultActivationMethod } from './vault-activation'
 import { createOpenCodeVaultCustody } from './vault-custody'
 
 export type { PluginResult } from './types'
@@ -855,16 +856,24 @@ export const createAntigravityPlugin =
         }),
     })
     lifecycle.register({ dispose: () => accountOAuth.dispose() })
-    const oauthMethods = createOAuthMethods({
-      mayStartLocalWork: async () => (await readAuthority()) === 'local',
-      client,
-      providerId,
-      config,
-      lifecycle,
-      accountAccess,
-      quotaManager,
-      getAuth: async () => (cachedGetAuth ? cachedGetAuth() : undefined),
-    })
+    const authSource = await readAuthority()
+    const oauthMethods =
+      authSource === 'vault'
+        ? [createV1VaultActivationMethod({ providerId, readAuthority })]
+        : authSource === 'unreadable'
+          ? []
+          : createOAuthMethods({
+              mayStartLocalWork: async () =>
+                (await readAuthority()) === 'local',
+              client,
+              providerId,
+              config,
+              lifecycle,
+              accountAccess,
+              quotaManager,
+              getAuth: async () =>
+                cachedGetAuth ? cachedGetAuth() : undefined,
+            })
 
     const rpcServer = await startRpcServer({
       dir: getRpcDir(directory),

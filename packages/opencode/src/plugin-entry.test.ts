@@ -32,6 +32,7 @@ import { GEMINI_DUMP_COMMAND_NAME } from './plugin/gemini-dump.ts'
 import { createAntigravityPlugin } from './plugin/index'
 import { getStoragePath } from './plugin/storage'
 import type { PluginClient, PluginInput } from './plugin/types.ts'
+import { V1_VAULT_ACTIVATION_LABEL } from './plugin/vault-activation'
 import {
   createOpenCodeVaultCustody,
   OPENCODE_VAULT_ENROLLMENT_NAME,
@@ -303,12 +304,15 @@ it('the production V1 entry opens the vault menu without opening or changing dor
       createPluginInput(client, owned),
     )
     dispose = plugin.dispose
-    const localLogin = plugin.auth?.methods.find(
-      (method) => method.type === 'oauth',
-    )
-    if (localLogin?.type !== 'oauth')
-      throw new Error('the native OAuth method is absent')
-    await expect(localLogin.authorize()).rejects.toThrow(VAULT_ACCOUNT_REMEDY)
+    expect(plugin.auth?.methods.map((method) => method.label)).toEqual([
+      V1_VAULT_ACTIVATION_LABEL,
+    ])
+    const vaultLogin = plugin.auth?.methods[0]
+    if (vaultLogin?.type !== 'oauth')
+      throw new Error('the vault activation method is absent')
+    const activation = await vaultLogin.authorize()
+    expect(activation.url).toBe('')
+    expect(activation.method).toBe('auto')
     await expect(
       plugin['command.execute.before']?.(
         {

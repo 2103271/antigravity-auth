@@ -4,6 +4,7 @@ import {
   createAccountRepositoryFactory,
   type EnrollmentAuthority,
   getHealthTracker,
+  loadCommonAuthClaustrum,
   loadCommonAuthStoreModules,
   VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
@@ -406,6 +407,19 @@ export function createAuthLoader({
       )
   }
 
+  async function readLocalHostAuth(getAuth: GetAuth) {
+    const auth = await getAuth()
+    // After disconnect, the activation marker is not a local account.
+    // Refuse before opening or repairing the pool; a real sign-in is required.
+    const claustrum = await loadCommonAuthClaustrum()
+    claustrum.assertHostSlotMatchesMode({
+      mode: 'local',
+      auth,
+      provider: providerId,
+    })
+    return auth
+  }
+
   async function runLoader(
     getAuth: GetAuth,
     provider: Provider,
@@ -415,7 +429,7 @@ export function createAuthLoader({
     latestGetAuth = getAuth
     const authority = (await readAuthority?.()) ?? 'local'
     if (authority !== 'local') return finishLoad(provider)
-    let auth = await getAuth()
+    let auth = await readLocalHostAuth(getAuth)
 
     const opening = await openStore()
     if (opening.status === 'ready') {
@@ -578,7 +592,7 @@ export function createAuthLoader({
   reloadRuntime = async (getAuth: GetAuth): Promise<void> => {
     if (closed) throw new Error('The account loader is disposed')
     if (((await readAuthority?.()) ?? 'local') !== 'local') return
-    const auth = await getAuth()
+    const auth = await readLocalHostAuth(getAuth)
     if (!isOAuthAuth(auth) && !readAuthority) return
     const opening = await openStore()
     if (opening.status === 'ready') {
