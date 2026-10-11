@@ -47,6 +47,8 @@ export interface AccountRequestRuntime {
 
 export interface PluginLifecycle extends Disposable {
   getAccountManager(): AccountManager | null
+  /** True from the start of final shutdown, before any disposal hook runs. */
+  isClosing(): boolean
   /**
    * Publishes `manager` as the account manager and `requests` as the runtime
    * serving it. The previous refresh queue stops at once, and the
@@ -83,6 +85,7 @@ export function createPluginLifecycle(
     done: Promise<void>
   }>()
   let disposal: Promise<void> | null = null
+  let closing = false
   const producers: Disposable[] = []
   const consumers: Disposable[] = []
   const drainSidebarWrites = options.drainSidebarWrites ?? NOOP_DRAIN
@@ -164,7 +167,7 @@ export function createPluginLifecycle(
     disposable: Disposable,
     phase: LifecyclePhase = 'consumer',
   ): void => {
-    if (disposal) {
+    if (closing) {
       void disposable.dispose()
       return
     }
@@ -177,8 +180,9 @@ export function createPluginLifecycle(
 
   return {
     getAccountManager: () => accountManager,
+    isClosing: () => closing,
     async replaceAccountRuntime(manager, queue, requests = null) {
-      if (!disposal) {
+      if (!closing) {
         const oldQueue = refreshQueue
         const oldManager = accountManager
         const oldRequests = accountRequests
@@ -194,7 +198,7 @@ export function createPluginLifecycle(
           await oldQueue?.dispose()
         }
       }
-      if (disposal) {
+      if (closing) {
         await requests?.dispose()
         await queue?.dispose()
         await manager.dispose()
@@ -208,7 +212,16 @@ export function createPluginLifecycle(
     register,
     dispose() {
       if (!disposal) {
-        disposal = (async () => {
+        // Hooks can synchronously reenter admission or disposal. Publish both
+        // closing and the shared completion promise before invoking any hook.
+        closing = true
+        let finishDisposal: () => void = () => {}
+        let failDisposal: (error: unknown) => void = () => {}
+        disposal = new Promise<void>((resolve, reject) => {
+          finishDisposal = resolve
+          failDisposal = reject
+        })
+        void (async () => {
           await disposeAccountRuntime()
           await options.shutdownDiskSignatureCache()
           options.sessionRegistry.clear()
@@ -231,7 +244,7 @@ export function createPluginLifecycle(
             await disposable.dispose()
           }
           consumers.length = 0
-        })()
+        })().then(finishDisposal, failDisposal)
       }
       return disposal
     },
