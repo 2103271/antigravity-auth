@@ -1315,6 +1315,8 @@ export function createGaTlsFiles(
 
 export interface GaRawPeer {
   requests: Array<{
+    method: string
+    url: string
     body: string
     rawHeaders: string[]
     receivedAt: number
@@ -1329,7 +1331,7 @@ export interface GaRawPeer {
 export async function startGaRawPeer(
   files: GaTlsFiles,
   mode: 'success' | 'connecting' | 'pre-header' | 'post-header',
-  nonce: string,
+  nonce: string | (() => string),
 ): Promise<GaRawPeer> {
   requireCondition(
     process.env.ANTIGRAVITY_GA_HOST_EXECUTION === '1',
@@ -1364,18 +1366,22 @@ export async function startGaRawPeer(
               )
               const peer = request.socket.remotePort ?? 0
               requests.push({
+                method: request.method ?? '',
+                url: request.url ?? '',
                 body,
                 rawHeaders: request.rawHeaders,
                 receivedAt: gaTimestamp(),
                 peer,
               })
-              if (bodyHasPrimaryNonce(body, nonce)) emit('primary.parsed', peer)
+              const primaryNonce = typeof nonce === 'function' ? nonce() : nonce
+              if (bodyHasPrimaryNonce(body, primaryNonce))
+                emit('primary.parsed', peer)
               if (mode === 'pre-header') return
               response.writeHead(200, {
                 'content-type': 'text/event-stream',
                 'cache-control': 'no-cache',
               })
-              const content = `data: ${JSON.stringify({ response: { candidates: [{ index: 0, content: { role: 'model', parts: [{ text: `GA_OK_${nonce}` }] } }] } })}\r\n\r\n`
+              const content = `data: ${JSON.stringify({ response: { candidates: [{ index: 0, content: { role: 'model', parts: [{ text: `GA_OK_${primaryNonce}` }] } }] } })}\r\n\r\n`
               response.write(content)
               emit('content.sent', peer)
               if (mode === 'post-header') return

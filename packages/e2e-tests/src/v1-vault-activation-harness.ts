@@ -666,17 +666,15 @@ export async function runNativeActivation(
 
 type SubcWire = typeof import('@cortexkit/subc-client')
 
-async function withSyntheticVault(
+export async function withSyntheticVault(
   profile: string,
-  receipt: ActivationReceipt,
+  receipt: Pick<ActivationReceipt, 'vaultCalls'>,
   env: NodeJS.ProcessEnv,
   run: () => Promise<void>,
+  clientBase = join(ROOT, 'packages/opencode/src'),
 ): Promise<void> {
   // Use the production client's own framing and proof implementation rather than a replacement client.
-  const clientEntry = Bun.resolveSync(
-    '@cortexkit/claustrum-client',
-    join(ROOT, 'packages/opencode/src'),
-  )
+  const clientEntry = Bun.resolveSync('@cortexkit/claustrum-client', clientBase)
   const subc: SubcWire = await import(
     Bun.resolveSync('@cortexkit/subc-client', dirname(clientEntry))
   )

@@ -187,6 +187,47 @@ export async function prepareNativeGaConsumer(
     errorOnExist: true,
     force: false,
   })
+  await installNativeGaPacks(repo, prefix)
+  for (const forbidden of [
+    '@opencode/plugin',
+    '@opencode-ai',
+    '@opentui',
+    'solid-js',
+  ])
+    check(
+      !existsSync(join(prefix, 'node_modules', forbidden)),
+      `Consumer installed a package-owned host framework: ${forbidden}`,
+    )
+  writeFileSync(
+    join(prefix, 'artifacts.json'),
+    JSON.stringify(
+      {
+        sourceRevision: process.env.GA_SOURCE_REVISION,
+        sourceTree: process.env.GA_SOURCE_TREE,
+        pinSha256: sha256(readFileSync(join(repo, GA_PIN_PATH))),
+        contractSha256: sha256(readFileSync(join(repo, GA_CONTRACT_PATH))),
+        fixtureLockSha256: sha256(readFileSync(join(fixture, 'bun.lock'))),
+        coreSha256: sha256(readFileSync(join(prefix, 'core.tgz'))),
+        pluginSha256: sha256(readFileSync(join(prefix, 'plugin.tgz'))),
+        binarySha256: pin.binarySha256,
+        installation:
+          'verified local packs with trusted frozen dependency closure; no runtime registry or lifecycle scripts',
+      },
+      null,
+      2,
+    ),
+    { flag: 'wx', mode: 0o600 },
+  )
+}
+
+/** Install the real local packs into an already prepared, owned dependency closure. */
+export async function installNativeGaPacks(
+  repo: string,
+  prefix: string,
+): Promise<void> {
+  assertMeasuredNativeJob()
+  check(realpathSync(prefix) === prefix, 'Packed consumer must be canonical')
+  assertInstalledTree(join(prefix, 'node_modules'))
   mkdirSync(join(prefix, 'preparation'), { mode: 0o700 })
   const paths = prepareGaRoot(join(prefix, 'preparation'))
   const env = gaChildEnvironment(paths, {})
@@ -252,36 +293,6 @@ export async function prepareNativeGaConsumer(
   )
   gaInstalledServer(prefix, 'import')
   gaInstalledServer(prefix, 'types')
-  for (const forbidden of [
-    '@opencode/plugin',
-    '@opencode-ai',
-    '@opentui',
-    'solid-js',
-  ])
-    check(
-      !existsSync(join(prefix, 'node_modules', forbidden)),
-      `Consumer installed a package-owned host framework: ${forbidden}`,
-    )
-  writeFileSync(
-    join(prefix, 'artifacts.json'),
-    JSON.stringify(
-      {
-        sourceRevision: process.env.GA_SOURCE_REVISION,
-        sourceTree: process.env.GA_SOURCE_TREE,
-        pinSha256: sha256(readFileSync(join(repo, GA_PIN_PATH))),
-        contractSha256: sha256(readFileSync(join(repo, GA_CONTRACT_PATH))),
-        fixtureLockSha256: sha256(readFileSync(join(fixture, 'bun.lock'))),
-        coreSha256: sha256(readFileSync(join(prefix, 'core.tgz'))),
-        pluginSha256: sha256(readFileSync(join(prefix, 'plugin.tgz'))),
-        binarySha256: pin.binarySha256,
-        installation:
-          'verified local packs with trusted frozen dependency closure; no runtime registry or lifecycle scripts',
-      },
-      null,
-      2,
-    ),
-    { flag: 'wx', mode: 0o600 },
-  )
 }
 
 /** Read declaration targets from the genuine installed 2.0.22 SDK dependency layout. */
