@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "package": "@cortexkit/common-auth",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "artifactStatus": "released",
   "publicRoots": {
     "./store": {
@@ -37,15 +37,15 @@
       "import": "./dist/pi-slot/index.js"
     }
   },
-  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.14.1.tgz",
-  "tarballSha256": "544304bbcc287aa93cb2a94938e20c80e07509ebbcafbc6b784a3893187868fb",
-  "sri": "sha512-QNoECbEdYHMx6tv6SK2FFOq+lnweB6Krr+1SDrOT3jCntfSMs4JpuCDYixnprsbnVmfqjezc4UmbkgoQpWd3LQ==",
-  "canonicalFiles": 128,
-  "canonicalBytes": 692323,
+  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.14.2.tgz",
+  "tarballSha256": "bf0f0828d155183dec1c29e5277ededd6cbd46e6b839ca696434e477f081216b",
+  "sri": "sha512-cGG0Ye6MsLL7K5cTddI4UShOoVR6Zas2G1aSspJZURDyHwiMY1qzCVav7p1DF49uBp5qTK3t3cahZ3cvjxVyHQ==",
+  "canonicalFiles": 129,
+  "canonicalBytes": 696000,
   "generator": {
     "path": "packages/opencode/scripts/embed-common-auth.ts",
     "version": 3,
-    "sha256": "27cd90bd3555cd92066edb5754e490162c1725c66da59d2789643c340458ecac"
+    "sha256": "1717582e7006925e7bd875d1bcc57d9e2809df5614c920cf820f097550102938"
   },
   "files": [
     {
@@ -131,17 +131,17 @@
     {
       "source": "package/dist/auth-menu/login.d.ts",
       "output": "auth-menu/login.d.ts",
-      "bytes": 1980,
-      "sourceSha256": "faf5ffe70a0187b9a3451faae4fdb49474acd66b2e7b620c389c2111f3dc4033",
-      "outputSha256": "faf5ffe70a0187b9a3451faae4fdb49474acd66b2e7b620c389c2111f3dc4033",
+      "bytes": 2211,
+      "sourceSha256": "eb6d85bdff6cc5d614d263ba2e972e535bc5a770cbe1d98b6265341ce1085340",
+      "outputSha256": "eb6d85bdff6cc5d614d263ba2e972e535bc5a770cbe1d98b6265341ce1085340",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/auth-menu/login.js",
       "output": "auth-menu/login.js",
-      "bytes": 2166,
-      "sourceSha256": "a3674a8bc6f19bb737d5a728182573a5ec23af3f9714f7e83d3e94eeb414e74c",
-      "outputSha256": "a3674a8bc6f19bb737d5a728182573a5ec23af3f9714f7e83d3e94eeb414e74c",
+      "bytes": 3698,
+      "sourceSha256": "cced3c8bf07c9782f88b9b49d0ace79ff70c8b32919eba4856face9398a39eae",
+      "outputSha256": "cced3c8bf07c9782f88b9b49d0ace79ff70c8b32919eba4856face9398a39eae",
       "transform": "verbatim"
     },
     {
@@ -219,9 +219,9 @@
     {
       "source": "package/dist/claustrum/consumer.js",
       "output": "claustrum/consumer.js",
-      "bytes": 11915,
-      "sourceSha256": "b616be70b61f7ba90262759d51aed31a8f71abf54a6484b0740dfdf6d2458623",
-      "outputSha256": "b616be70b61f7ba90262759d51aed31a8f71abf54a6484b0740dfdf6d2458623",
+      "bytes": 12321,
+      "sourceSha256": "248a328c03690d6309ba45701d1548e2094fd503bf2978d4850df1611212a1ac",
+      "outputSha256": "248a328c03690d6309ba45701d1548e2094fd503bf2978d4850df1611212a1ac",
       "transform": "verbatim"
     },
     {
@@ -1070,6 +1070,14 @@
       "bytes": 14708,
       "sourceSha256": "d5a4338ef9795e4d638e221d40a25334909db74db6456e2823f5870f7c963854",
       "outputSha256": "d5a4338ef9795e4d638e221d40a25334909db74db6456e2823f5870f7c963854",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/util/any-signal.js",
+      "output": "util/any-signal.js",
+      "bytes": 1508,
+      "sourceSha256": "454adc21f90c42f5caa2c6b8374c1a7532623a1b954fe06a030afbc9248c10fe",
+      "outputSha256": "454adc21f90c42f5caa2c6b8374c1a7532623a1b954fe06a030afbc9248c10fe",
       "transform": "verbatim"
     }
   ],

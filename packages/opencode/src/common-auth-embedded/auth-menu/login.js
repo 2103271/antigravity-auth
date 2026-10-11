@@ -1,12 +1,32 @@
-import { execFileSync as defaultExecFileSync } from 'node:child_process';
+import { execFileSync as defaultExecFileSync, spawn as defaultSpawn, } from 'node:child_process';
 /** Opens a URL with the platform's opener; false when that fails. */
-export function openBrowserForMenu(url, platform = process.platform, execFileSync = defaultExecFileSync) {
+export function openBrowserForMenu(url, platform = process.platform, execFileSync = defaultExecFileSync, spawn = defaultSpawn) {
     try {
         if (platform === 'win32') {
-            execFileSync('cmd', ['/c', 'start', '', url], {
-                stdio: 'ignore',
-                timeout: 3000,
-            });
+            // Start-Process opens the URL with its associated app. Base64 UTF-16LE
+            // keeps cmd from parsing the URL; Microsoft documents both options:
+            // https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-7.5
+            // https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1#-encodedcommand-base64encodedcommand
+            // PowerShell is launched without waiting for it: a cold Windows
+            // PowerShell start took about 6 s on a Windows Server 2022 runner, and a
+            // waiting caller with a short timeout killed it before the browser
+            // opened. It is not detached: a detached PowerShell has no console and
+            // never ran the command on any Windows runner.
+            const command = `Start-Process '${url.replaceAll("'", "''")}'`;
+            const child = spawn('powershell.exe', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-WindowStyle',
+                'Hidden',
+                '-EncodedCommand',
+                Buffer.from(command, 'utf16le').toString('base64'),
+            ], { stdio: 'ignore', windowsHide: true });
+            // A failed launch reports asynchronously; without a listener it would
+            // become an uncaught exception after this function has returned.
+            child.on('error', () => { });
+            child.unref();
+            // Node leaves pid undefined when the process could not be started.
+            return child.pid !== undefined;
         }
         else {
             execFileSync(platform === 'darwin' ? 'open' : 'xdg-open', [url], {

@@ -1,4 +1,5 @@
 import { createLogger } from '../logger/index.js';
+import { combineAbortSignals } from '../util/any-signal.js';
 import { ClaustrumScopedCustody, decideScopedRetryAfter401, } from './custody.js';
 import { ClaustrumConsumerError } from './errors.js';
 import { acceptVaultRoute, declineVaultRoute, readVaultRoster, recordVaultQuota, refreshVaultRoster, vaultRoutingRows, } from './roster.js';
@@ -32,30 +33,33 @@ export class ClaustrumConsumer {
         return (await this.#options.isCustodyActive?.()) ?? true;
     }
     #wait(pending, signal) {
-        const combined = AbortSignal.any([
+        const combined = combineAbortSignals([
             this.#shutdown.signal,
             ...(signal ? [signal] : []),
         ]);
         return new Promise((resolve, reject) => {
-            const cleanup = () => combined.removeEventListener('abort', abort);
+            const cleanup = () => {
+                combined.signal.removeEventListener('abort', abort);
+                combined.dispose();
+            };
             const abort = () => {
                 cleanup();
-                reject(combined.reason);
+                reject(combined.signal.reason);
             };
-            combined.addEventListener('abort', abort, { once: true });
+            combined.signal.addEventListener('abort', abort, { once: true });
             // Observe the operation even after cancellation: shared metadata work may
             // finish for other callers, and a late connection must still be closed.
             pending.then((value) => {
                 cleanup();
-                if (combined.aborted)
-                    reject(combined.reason);
+                if (combined.signal.aborted)
+                    reject(combined.signal.reason);
                 else
                     resolve(value);
             }, (error) => {
                 cleanup();
                 reject(error);
             });
-            if (combined.aborted)
+            if (combined.signal.aborted)
                 abort();
         });
     }
@@ -181,13 +185,23 @@ export class ClaustrumConsumer {
             configured.credentialId !== observed.credentialId ||
             configured.accountIdentity !== observed.accountIdentity)
             throw new ClaustrumConsumerError('route-unavailable', 'Claustrum route is disabled, removed or changed');
-        return (await this.#wait(this.#getCustody(), signal)).authorize({
-            credentialId: configured.credentialId,
-            credentialType: configured.credentialType,
-            ...(configured.accountIdentity !== undefined && {
-                accountIdentity: configured.accountIdentity,
-            }),
-        }, AbortSignal.any([this.#shutdown.signal, ...(signal ? [signal] : [])]));
+        const custody = await this.#wait(this.#getCustody(), signal);
+        const combined = combineAbortSignals([
+            this.#shutdown.signal,
+            ...(signal ? [signal] : []),
+        ]);
+        try {
+            return await custody.authorize({
+                credentialId: configured.credentialId,
+                credentialType: configured.credentialType,
+                ...(configured.accountIdentity !== undefined && {
+                    accountIdentity: configured.accountIdentity,
+                }),
+            }, combined.signal);
+        }
+        finally {
+            combined.dispose();
+        }
     }
     async reportFailure(attempt, status, source) {
         this.#assertOpen();

@@ -101,6 +101,7 @@
     ],
     "claustrum/consumer.js": [
       "../logger/index.js",
+      "../util/any-signal.js",
       "./custody.js",
       "./errors.js",
       "./roster.js"
@@ -237,6 +238,18 @@
     "opencode2/types.d.ts": [
       "@opencode/plugin",
       "@opencode/plugin/promise/session"
+    ],
+    "pi-slot/index.d.ts": ["./slot.js"],
+    "pi-slot/index.js": ["./slot.js"],
+    "pi-slot/lock.js": ["node:fs", "node:fs/promises"],
+    "pi-slot/slot.js": [
+      "../fs/atomic-write.js",
+      "./lock.js",
+      "node:crypto",
+      "node:fs",
+      "node:fs/promises",
+      "node:path",
+      "node:timers/promises"
     ],
     "quota/codec.js": ["./map.js", "./merge.js"],
     "quota/format.d.ts": ["./projection.js"],
@@ -516,18 +529,6 @@
     ],
     "store/torn.d.ts": ["./identity.js", "./schema.js"],
     "store/torn.js": ["./identity.js", "./schema.js"],
-    "tui/index.js": ["node:path"],
-    "pi-slot/index.d.ts": ["./slot.js"],
-    "pi-slot/index.js": ["./slot.js"],
-    "pi-slot/lock.js": ["node:fs", "node:fs/promises"],
-    "pi-slot/slot.js": [
-      "../fs/atomic-write.js",
-      "./lock.js",
-      "node:crypto",
-      "node:fs",
-      "node:fs/promises",
-      "node:path",
-      "node:timers/promises"
-    ]
+    "tui/index.js": ["node:path"]
   }
 }
