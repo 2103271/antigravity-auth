@@ -122,6 +122,16 @@ In local mode, the CLI and both OpenCode adapters use the same shared account st
 
 This guide describes the current source tree, not a claim that an unreleased major version is available on npm. Use `antigravity-auth` from the **build you are upgrading to**, whose `--help` lists `init`, `migrate`, and `rollback`; an older installed CLI may not implement them. Below, “new CLI” means that build's CLI.
 
+**Before a major upgrade**, set the top-level `auto_update` field to `false` in the effective `antigravity.json` (merge into existing settings), and ensure project overrides do not re-enable it:
+
+```json
+{
+  "auto_update": false
+}
+```
+
+The published v2.2.1 default is `true`; its update check on host restart can advance pinned plugin configs across major versions. A version specifier alone is not an update hold. This precaution disables the existing automatic config update, not the required offline migration. See the [v2.2.1 updater](https://github.com/cortexkit/antigravity-auth/blob/v2.2.1/packages/opencode/src/hooks/auto-update-checker/index.ts) and [schema](https://github.com/cortexkit/antigravity-auth/blob/v2.2.1/packages/opencode/src/plugin/config/schema.ts).
+
 - **Fresh installation:** run `antigravity-auth init` before login. Initialization refuses an existing legacy OpenCode pool.
 - **Upgrade an existing legacy OpenCode pool:** stop **every OpenCode and Antigravity process and timer** using that pool, then run `antigravity-auth migrate --offline`. Type `yes` at the stopped-process confirmation prompt. Optional `--yes` skips the prompt but does not make concurrent use safe.
 - **Downgrade after migration:** stop every OpenCode and Antigravity process and timer using the pool again, run `antigravity-auth rollback --offline` with the **new CLI**, confirm and wait for success, then install/start the older build. Never run old and new builds concurrently.
@@ -193,7 +203,7 @@ Account selection (`account_selection_strategy`):
 
 ### Local authority and vault custody
 
-Use `/antigravity` → Vault to request access, select approved vault accounts, or return to local mode. **Local** authority uses the initialized/migrated local repository. **Vault custody** uses vault request credentials and excludes the local pool; failed enrollment, unavailable vault data, or a conflicting native Google login must not silently fall back to local credentials. Source selection is persisted separately from pool data. Do not hand-edit mode files or copy credentials between stores to bypass a refusal. See [`vault-custody.ts`](packages/opencode/src/plugin/vault-custody.ts) and [`auth-loader.ts`](packages/opencode/src/plugin/auth-loader.ts).
+Use `/antigravity` → Vault to request access, select approved vault accounts, or return to local mode. **Local** authority uses the initialized/migrated local repository. **Vault custody** uses vault request credentials and excludes the local pool; unavailable enrollment or vault data does not permit a local fallback. V1 vault serving checks enrollment once the host reaches `auth.loader`; dormant native Google logins and placeholder records not owned by the current enrollment remain unchanged and do not block vault requests. Explicit V1 provider activation is separate and refuses an occupied native slot. GA serving requires its owned native Google connection, while Pi serving requires its owned non-secret Google-slot marker. Do not hand-edit mode files or copy credentials to bypass a refusal. See [`vault-custody.ts`](packages/opencode/src/plugin/vault-custody.ts), [`auth-loader.ts`](packages/opencode/src/plugin/auth-loader.ts), and [`vault-activation.ts`](packages/opencode/src/plugin/vault-activation.ts).
 
 ## Quota semantics and killswitch
 
@@ -336,7 +346,7 @@ The Pi extension registers the `google` provider through `pi.extensions`; select
 | `operator.killswitch.accounts` | record<string, number> | unset | — | Optional per-account override (key = `sha256(refreshToken).slice(0,12)`). Absent by default; falls back to `minimum_remaining_percent`. |
 | `operator.log_level` | `error` \| `warn` \| `info` \| `debug` \| `trace` | `"info"` | — | Runtime log-level filter (`/antigravity` → Diagnostics). |
 
-`globalThis.fetch` calls inside the package go through `fetchWithActiveTimeout` (see [State, cache, log, RPC, and dump files](#state-cache-log-rpc-and-dump-files)).
+Raw generative AGY sends and standard-fetch callers use different timeout scopes (see [State, cache, log, RPC, and dump files](#state-cache-log-rpc-and-dump-files)).
 
 ## State, cache, log, RPC, and dump files
 
@@ -351,11 +361,11 @@ The Pi extension registers the `google` provider through `pi.extensions`; select
 | Signature cache | `signature-cache-disk-<hash>.json` under `keep_thinking` path | `0600` | 2-day default TTL. |
 | Wire dump | `antigravity-logs/dumps/` | `0600` | Sensitive — see [Security and redaction](#security-and-redaction). |
 
-The **fetch interceptor** uses `fetchWithActiveTimeout` (`packages/core/src/fetch-timeout.ts`). The contract is intentional: the **`15_000` ms header-timeout** aborts only the request until the underlying `fetch` resolves; once headers arrive the timeout listener is removed and the body may stream past the deadline. **Streaming responses are bounded by the `agy-transport.ts` idle-timeout watchdog (`180_000` ms / 3 min)**, so a stalled SSE chunk counts as a transport failure even though the header budget has been exceeded. Operators should not raise the 15s header window to chase a streaming response — the stream watchdog is the right knob.
+The raw generative AGY path uses [`agy-transport.ts`](packages/core/src/agy-transport.ts), with a default **`180_000` ms (3 min) response-header wait** and a separate **`180_000` ms no-body-data idle timeout**. Neither is a total streaming deadline. The standard-fetch helper [`fetchWithActiveTimeout`](packages/core/src/fetch-timeout.ts), used by other callers including Gemini CLI-style sends, defaults to **`15_000` ms until headers arrive**; it removes that timeout at headers but keeps caller cancellation connected until the body ends, errors, or is canceled. Do not interpret the helper's 15s budget as the raw AGY transport's limit.
 
 The **V1 RPC** between the TUI and [`rpc-server.ts`](packages/opencode/src/rpc/rpc-server.ts) uses a per-PID port file (`$XDG_STATE_HOME/cortexkit/antigravity-auth/rpc/<project-hash>/port-<pid>.json`). The TUI reads a live entry and exchanges shared menu requests/notifications with the loopback server using a `Bearer <token>` header. GA has its own server/TUI integration; do not treat the V1 port-file protocol as a host config requirement.
 
-**V1 disposal:** the plugin's `dispose()` (called on host shutdown) drains sidebar writes via `drainSidebarWrites()` BEFORE tearing down the RPC server and file logger so any in-flight write enqueued at shutdown lands before the host closes the terminal. The lifecycle disposes (in order): the active `AccountManager` + token refresh queue → the disk signature cache → the session registry → the fetch state → sidebar drain → registered disposables (RPC server, file logger).
+**V1 disposal:** `dispose()` marks the plugin closing synchronously, blocking new admission. It aborts and waits for live and retiring requests and token-refresh shutdown before releasing their account managers, then closes the signature cache and clears session/fetch state. Registered producers (components that enqueue sidebar writes) stop first so the sidebar-write queue can settle; registered consumers (RPC server/file logger) stop after that drain. This orders shutdown and waits for queued work to settle; it does not guarantee every attempted write succeeded or the terminal rendered a final snapshot. See [`lifecycle.ts`](packages/opencode/src/plugin/lifecycle.ts).
 
 ## Security and redaction
 

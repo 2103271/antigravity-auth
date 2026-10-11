@@ -108,6 +108,16 @@ The public TUI loader chooses V1 (`src/tui-compiled/`, `src/tui-raw/`) or GA (`s
 
 The local OpenCode pool now uses a shared account store, not direct writes to legacy `antigravity-accounts.json`. Use `antigravity-auth` from the **build you are upgrading to**, whose `--help` lists `init`, `migrate`, and `rollback`, before starting the host. “New CLI” below means that build's CLI:
 
+**Before a major upgrade**, disable automatic config updates with the top-level setting below in the effective `antigravity.json`; project overrides must not re-enable it:
+
+```json
+{
+  "auto_update": false
+}
+```
+
+The published v2.2.1 default is `true`, and its restart-time update check can advance pinned configs across majors. Pinning a version alone is not an update hold. Merge this setting into existing config before stopping the host for migration; it does not replace the offline procedure. See the [root upgrade guide](../../README.md#major-upgrades-migration-and-rollback) for the historical updater/schema references.
+
 - **Fresh installation:** run `antigravity-auth init`, then log in. Initialization refuses an existing legacy pool; use migration instead.
 - **Existing legacy OpenCode pool:** stop **every OpenCode and Antigravity process and timer** that can use the pool, then run `antigravity-auth migrate --offline`. Confirm the stopped-process prompt by typing `yes`. Optional `--yes` skips the prompt, not the requirement to stop processes.
 - **Downgrade after migration:** stop every OpenCode and Antigravity process and timer using the pool again, run `antigravity-auth rollback --offline` with the **new CLI**, confirm and wait for successful completion, and only then install/start an older build.
@@ -193,7 +203,7 @@ Use the Google provider login or `/antigravity` → Sign in to add local account
 
 ### Local authority / vault custody
 
-Both OpenCode host lines share the local store at the resolved account path; starting a new project does not create a separate pool. `/antigravity` → Vault manages approved enrollment and source selection. Local authority uses credentials from the local repository for requests; vault custody uses only approved vault credentials and excludes the local pool. An unavailable vault or a conflicting native Google login is a refusal, not permission to fall back. Source-mode files and host Google activation are distinct from pool migration/rollback. See [`src/plugin/vault-custody.ts`](src/plugin/vault-custody.ts).
+Both OpenCode host lines share the local store at the resolved account path; starting a new project does not create a separate pool. `/antigravity` → Vault manages enrollment and source selection. Local authority uses local repository credentials; vault custody excludes the local pool, including when the vault is unavailable. Once the V1 host calls the plugin's provider `auth.loader`, the plugin uses vault credentials when enrollment authorizes them, without checking native Google-slot ownership: dormant logins and placeholder records not owned by the current enrollment remain unchanged. Explicit V1 provider activation is separate and refuses an occupied slot. GA serving requires its owned native Google connection; Pi serving requires its owned non-secret Google-slot marker. Host activation and source-mode files are separate from pool migration/rollback. See [`src/plugin/vault-custody.ts`](src/plugin/vault-custody.ts), [`src/plugin/auth-loader.ts`](src/plugin/auth-loader.ts), and [`src/plugin/vault-activation.ts`](src/plugin/vault-activation.ts).
 
 ## Sidebar / RPC state and recovery
 
@@ -205,16 +215,15 @@ The **V1 RPC** lives under `$XDG_STATE_HOME/cortexkit/antigravity-auth/rpc/<proj
 
 ## V1 disposal
 
-The plugin's `dispose()` (host shutdown) runs in order:
+`dispose()` marks the plugin closing synchronously so no new work is admitted. Shutdown then:
 
-1. Dispose the active `AccountManager` + proactive token-refresh queue.
-2. Shut down the disk signature cache (if `keep_thinking` is on).
-3. Clear the session registry.
-4. Drop the fetch-interceptor state.
-5. `drainSidebarWrites()` — wait for any in-flight sidebar-state merge to land so the TUI sees a fully landed snapshot if the user immediately reopens.
-6. Tear down registered disposables (RPC server, file logger, quota manager).
+1. Aborts and waits for live and retiring requests and token-refresh shutdown before disposing their account managers.
+2. Closes the disk signature cache and clears session/fetch state.
+3. Stops and waits for registered producers, so they cannot enqueue more sidebar writes.
+4. Waits for the queued sidebar writes to settle through `drainSidebarWrites()`.
+5. Stops registered consumers, including the RPC server and file logger.
 
-This ordering matters because a routing upsert enqueued at shutdown must land before the host closes the terminal. See `packages/opencode/src/plugin/lifecycle.ts:createPluginLifecycle`.
+The shutdown ordering above does not guarantee every attempted write succeeded or that the terminal rendered a final snapshot. See [`src/plugin/lifecycle.ts`](src/plugin/lifecycle.ts).
 
 ## File / state inventory (this package)
 
