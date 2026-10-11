@@ -35,8 +35,16 @@ type BrowserExec = (file: string, args: string[], options: {
     stdio: 'ignore';
     timeout: number;
 }) => unknown;
+type BrowserSpawn = (file: string, args: string[], options: {
+    stdio: 'ignore';
+    windowsHide: true;
+}) => {
+    pid?: number;
+    unref(): void;
+    on(event: 'error', listener: () => void): unknown;
+};
 /** Opens a URL with the platform's opener; false when that fails. */
-export declare function openBrowserForMenu(url: string, platform?: NodeJS.Platform, execFileSync?: BrowserExec): boolean;
+export declare function openBrowserForMenu(url: string, platform?: NodeJS.Platform, execFileSync?: BrowserExec, spawn?: BrowserSpawn): boolean;
 /**
  * Runs a login for the menu: a browser login first and, when no browser can
  * be opened, a device-code login instead, so a headless machine can still

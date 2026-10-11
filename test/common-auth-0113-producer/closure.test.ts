@@ -35,7 +35,7 @@ const sorted = (values: Iterable<string>) => [...new Set(values)].sort()
 
 async function archive() {
   const bytes = await readFile(join(root, inputPath))
-  expect(bytes.length).toBe(249741)
+  expect(bytes.length).toBe(251088)
   expect(digest(bytes)).toBe(publication.sha256)
   const entries = readVerifiedArchive(bytes, publication)
   validatePublication(entries)
@@ -130,13 +130,13 @@ test('producer.public_roots_and_exact_closure', async () => {
   const graph = reach(entries, starts)
   expect(graph.files).toEqual(selected)
   expect(graph.externals).toEqual(closure.nonlocalStaticImports)
-  expect(graph.files.length).toBe(155)
+  expect(graph.files.length).toBe(156)
   expect(
     graph.files.reduce(
       (sum, file) => sum + entries.get(`package/dist/${file}`)!.length,
       0,
     ),
-  ).toBe(818572)
+  ).toBe(822249)
   expect(graph.files.filter((file) => file.startsWith('routing/'))).toEqual(
     closure.routingFiles,
   )
@@ -209,11 +209,11 @@ test('producer.verbatim_map', async () => {
   const map = JSON.parse(
     await readFile(join(target, outputPath, 'source-output.json'), 'utf8'),
   )
-  expect(map.version).toBe('0.14.1')
+  expect(map.version).toBe('0.14.2')
   expect(map.artifactStatus).toBe('released')
   expect(map.publicRoots).toEqual(publication.publicRoots)
-  expect(map.canonicalFiles).toBe(155)
-  expect(map.canonicalBytes).toBe(818572)
+  expect(map.canonicalFiles).toBe(156)
+  expect(map.canonicalBytes).toBe(822249)
   expect(map.tarballSha256).toBe(publication.sha256)
   expect(map.sri).toBe(publication.sri)
   expect(map.transforms).toEqual([])
@@ -285,9 +285,9 @@ test('producer.shared_core_profile_exact_closure', async () => {
       'utf8',
     ),
   )
-  expect(required.length).toBe(128)
-  expect(map.canonicalFiles).toBe(128)
-  expect(map.canonicalBytes).toBe(692323)
+  expect(required.length).toBe(129)
+  expect(map.canonicalFiles).toBe(129)
+  expect(map.canonicalBytes).toBe(696000)
   expect(map.publicRoots).toEqual(profile.publicRoots)
   expect(map.tarballSha256).toBe(publication.sha256)
   expect(map.files.map((file: { output: string }) => file.output)).toEqual(

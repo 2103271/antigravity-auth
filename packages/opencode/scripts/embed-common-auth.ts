@@ -12,13 +12,13 @@ import { fileURLToPath } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 
 export const inputPath =
-  'tools/common-auth-build/inputs/cortexkit-common-auth-0.14.1.tgz'
-export const producerVersion = '0.14.1'
+  'tools/common-auth-build/inputs/cortexkit-common-auth-0.14.2.tgz'
+export const producerVersion = '0.14.2'
 export const artifactStatus = 'released'
 export const outputPath = 'packages/opencode/src/common-auth-embedded'
 export const productionPin = Object.freeze({
-  sha256: '544304bbcc287aa93cb2a94938e20c80e07509ebbcafbc6b784a3893187868fb',
-  sri: 'sha512-QNoECbEdYHMx6tv6SK2FFOq+lnweB6Krr+1SDrOT3jCntfSMs4JpuCDYixnprsbnVmfqjezc4UmbkgoQpWd3LQ==',
+  sha256: 'bf0f0828d155183dec1c29e5277ededd6cbd46e6b839ca696434e477f081216b',
+  sri: 'sha512-cGG0Ye6MsLL7K5cTddI4UShOoVR6Zas2G1aSspJZURDyHwiMY1qzCVav7p1DF49uBp5qTK3t3cahZ3cvjxVyHQ==',
 })
 export const publicRoots = {
   './rpc': { types: './dist/rpc/index.d.ts', import: './dist/rpc/index.js' },
@@ -139,13 +139,13 @@ const canonical: readonly (readonly [string, number, string])[] = [
   ],
   [
     'auth-menu/login.d.ts',
-    1980,
-    'faf5ffe70a0187b9a3451faae4fdb49474acd66b2e7b620c389c2111f3dc4033',
+    2211,
+    'eb6d85bdff6cc5d614d263ba2e972e535bc5a770cbe1d98b6265341ce1085340',
   ],
   [
     'auth-menu/login.js',
-    2166,
-    'a3674a8bc6f19bb737d5a728182573a5ec23af3f9714f7e83d3e94eeb414e74c',
+    3698,
+    'cced3c8bf07c9782f88b9b49d0ace79ff70c8b32919eba4856face9398a39eae',
   ],
   [
     'auth-menu/menu.d.ts',
@@ -194,8 +194,8 @@ const canonical: readonly (readonly [string, number, string])[] = [
   ],
   [
     'claustrum/consumer.js',
-    11915,
-    'b616be70b61f7ba90262759d51aed31a8f71abf54a6484b0740dfdf6d2458623',
+    12321,
+    '248a328c03690d6309ba45701d1548e2094fd503bf2978d4850df1611212a1ac',
   ],
   [
     'claustrum/custody.d.ts',
@@ -862,6 +862,11 @@ const canonical: readonly (readonly [string, number, string])[] = [
     950,
     'c9a1e381382128b64eea0b3b049beb1b210cb68e768ea04683662b8b1a73bbb1',
   ],
+  [
+    'util/any-signal.js',
+    1508,
+    '454adc21f90c42f5caa2c6b8374c1a7532623a1b954fe06a030afbc9248c10fe',
+  ],
 ]
 export const sha256 = (bytes: Uint8Array | string) =>
   createHash('sha256').update(bytes).digest('hex')
@@ -959,7 +964,7 @@ export function validatePublication(
     throw new Error('publication: license')
   if (
     sha256(`${[...entries.keys()].sort().join('\n')}\n`) !==
-    '988a5ee1bedc774973289d987fb02773a3df8a4206f74040f62c44a3fa17228d'
+    'e8029297b2ca9cf9e9f3b43709f58fc7ae22eb0026c3c492544f6d76b3ddaf86'
   )
     throw new Error('publication: inventory')
   for (const [path, bytes, hash] of canonical) {
@@ -969,7 +974,7 @@ export function validatePublication(
   }
   if (
     sha256(entries.get('package/package.json') ?? '') !==
-    '2a941d23f53b815d6b2a0f54c383091daf6052494579fcc5865ee8abc7c52465'
+    '3588f6584586433f03dd9123af05f5272a7950e4cec1323828f00b2a5c6dfeb5'
   )
     throw new Error('publication: manifest bytes')
 }
