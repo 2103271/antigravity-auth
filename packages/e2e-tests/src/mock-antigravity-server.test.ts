@@ -96,6 +96,249 @@ describe('mock antigravity server', () => {
     })
   })
 
+  for (const order of ['summary-first', 'cli-first', 'concurrent'] as const) {
+    it(`attributes scoped quota responses to each credential (${order})`, async () => {
+      await withServer(async (server) => {
+        const expected = [
+          {
+            endpoint: '/v1internal:retrieveUserQuotaSummary',
+            bearer: 'Bearer access-a',
+            project: 'managed-a',
+            body: { summary: 0.7 },
+          },
+          {
+            endpoint: '/v1internal:retrieveUserQuota',
+            bearer: 'Bearer access-a',
+            project: 'managed-a',
+            body: { cli: 0.4 },
+          },
+          {
+            endpoint: '/v1internal:retrieveUserQuotaSummary',
+            bearer: 'Bearer access-b',
+            project: 'managed-b',
+            body: { summary: 0.8 },
+          },
+          {
+            endpoint: '/v1internal:retrieveUserQuota',
+            bearer: 'Bearer access-b',
+            project: 'managed-b',
+            body: { cli: 0.5 },
+          },
+        ] as const
+        for (const entry of expected) {
+          server.enqueue({
+            kind: 'json',
+            match: {
+              method: 'POST',
+              endpoint: entry.endpoint,
+              bearer: entry.bearer,
+            },
+            body: entry.body,
+          })
+        }
+        const arrivals =
+          order === 'summary-first'
+            ? [expected[0], expected[2], expected[1], expected[3]]
+            : [expected[3], expected[1], expected[2], expected[0]]
+        const send = async (entry: (typeof expected)[number]) => {
+          const response = await fetch(`${server.baseUrl}${entry.endpoint}`, {
+            method: 'POST',
+            headers: {
+              authorization: entry.bearer,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ project: entry.project }),
+          })
+          expect(response.status).toBe(200)
+          expect(await response.json()).toEqual(entry.body)
+        }
+        if (order === 'concurrent') await Promise.all(arrivals.map(send))
+        else for (const entry of arrivals) await send(entry)
+        expect(
+          server.requests
+            .map((request) => ({
+              method: request.method,
+              endpoint: request.path,
+              bearer: request.headers.authorization,
+              body: request.body,
+            }))
+            .sort((a, b) =>
+              `${a.bearer}:${a.endpoint}`.localeCompare(
+                `${b.bearer}:${b.endpoint}`,
+              ),
+            ),
+        ).toEqual(
+          expected
+            .map((entry) => ({
+              method: 'POST',
+              endpoint: entry.endpoint,
+              bearer: entry.bearer,
+              body: JSON.stringify({ project: entry.project }),
+            }))
+            .sort((a, b) =>
+              `${a.bearer}:${a.endpoint}`.localeCompare(
+                `${b.bearer}:${b.endpoint}`,
+              ),
+            ),
+        )
+        expect(
+          server.requests.every((request) =>
+            Number.isFinite(request.receivedAt),
+          ),
+        ).toBe(true)
+      })
+    })
+  }
+
+  it('unmatched method, endpoint, or bearer cannot steal a scoped fixture', async () => {
+    await withServer(async (server) => {
+      const endpoint = '/v1internal:retrieveUserQuotaSummary'
+      server.enqueue({
+        kind: 'json',
+        match: { method: 'POST', endpoint, bearer: 'Bearer access-a' },
+        body: { summary: 0.7 },
+      })
+      for (const mismatch of [
+        { method: 'GET', endpoint, bearer: 'Bearer access-a' },
+        {
+          method: 'POST',
+          endpoint: '/v1internal:retrieveUserQuota',
+          bearer: 'Bearer access-a',
+        },
+        { method: 'POST', endpoint, bearer: 'Bearer access-a-extra' },
+      ]) {
+        const response = await fetch(`${server.baseUrl}${mismatch.endpoint}`, {
+          method: mismatch.method,
+          headers: { authorization: mismatch.bearer },
+        })
+        expect(response.status).toBe(500)
+        expect(await response.json()).toEqual({
+          error: { code: 8, message: 'mock-queue-empty', status: 'INTERNAL' },
+        })
+      }
+      const response = await fetch(`${server.baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer access-a' },
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ summary: 0.7 })
+      expect(
+        server.requests.map(({ method, path, headers }) => ({
+          method,
+          path,
+          bearer: headers.authorization,
+        })),
+      ).toEqual([
+        { method: 'GET', path: endpoint, bearer: 'Bearer access-a' },
+        {
+          method: 'POST',
+          path: '/v1internal:retrieveUserQuota',
+          bearer: 'Bearer access-a',
+        },
+        { method: 'POST', path: endpoint, bearer: 'Bearer access-a-extra' },
+        { method: 'POST', path: endpoint, bearer: 'Bearer access-a' },
+      ])
+    })
+  })
+
+  it('does not swap Summary and CLI responses for the same bearer', async () => {
+    await withServer(async (server) => {
+      server.enqueue({
+        kind: 'json',
+        match: {
+          method: 'POST',
+          endpoint: '/v1internal:retrieveUserQuotaSummary',
+          bearer: 'Bearer access-a',
+        },
+        body: { summary: 0.7 },
+      })
+      server.enqueue({
+        kind: 'json',
+        match: {
+          method: 'POST',
+          endpoint: '/v1internal:retrieveUserQuota',
+          bearer: 'Bearer access-a',
+        },
+        body: { cli: 0.4 },
+      })
+      const cli = await fetch(
+        `${server.baseUrl}/v1internal:retrieveUserQuota`,
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer access-a' },
+        },
+      )
+      expect(cli.status).toBe(200)
+      expect(await cli.json()).toEqual({ cli: 0.4 })
+      const summary = await fetch(
+        `${server.baseUrl}/v1internal:retrieveUserQuotaSummary`,
+        {
+          method: 'POST',
+          headers: { authorization: 'Bearer access-a' },
+        },
+      )
+      expect(summary.status).toBe(200)
+      expect(await summary.json()).toEqual({ summary: 0.7 })
+    })
+  })
+
+  it('prioritizes an exact scoped response over an earlier plain FIFO fixture', async () => {
+    await withServer(async (server) => {
+      server.enqueue({ kind: 'json', body: { plain: true } })
+      server.enqueue({
+        kind: 'json',
+        match: {
+          method: 'POST',
+          endpoint: '/quota',
+          bearer: 'Bearer access-a',
+        },
+        body: { scoped: true },
+      })
+      const scoped = await fetch(`${server.baseUrl}/quota`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer access-a' },
+      })
+      expect(await scoped.json()).toEqual({ scoped: true })
+      const plain = await fetch(`${server.baseUrl}/plain`)
+      expect(await plain.json()).toEqual({ plain: true })
+      expect(
+        server.requests.map(({ method, path }) => ({ method, path })),
+      ).toEqual([
+        { method: 'POST', path: '/quota' },
+        { method: 'GET', path: '/plain' },
+      ])
+    })
+  })
+
+  it('keeps ordinary FIFO fixtures available behind unmatched scoped fixtures', async () => {
+    await withServer(async (server) => {
+      server.enqueue({
+        kind: 'json',
+        match: {
+          method: 'POST',
+          endpoint: '/quota',
+          bearer: 'Bearer access-a',
+        },
+        body: { scoped: true },
+      })
+      server.enqueue({ kind: 'json', body: { count: 1 } })
+      server.repeat({ kind: 'json', body: { count: 2 } }, 2)
+      for (const count of [1, 2, 2]) {
+        expect(await (await fetch(`${server.baseUrl}/plain`)).json()).toEqual({
+          count,
+        })
+      }
+      expect(
+        await (
+          await fetch(`${server.baseUrl}/quota`, {
+            method: 'POST',
+            headers: { authorization: 'Bearer access-a' },
+          })
+        ).json(),
+      ).toEqual({ scoped: true })
+    })
+  })
+
   it('returns 500 with INTERNAL when the queue is empty', async () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.baseUrl}/empty`)
