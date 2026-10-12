@@ -1319,7 +1319,10 @@ function jsonBytes(bytes: Uint8Array): unknown {
 }
 async function syncFile(path: string): Promise<void> {
   await secureRead(path)
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  // Windows FlushFileBuffers requires write access even when no bytes change.
+  const access =
+    process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY
+  const handle = await open(path, access | constants.O_NOFOLLOW)
   try {
     await handle.sync()
   } finally {

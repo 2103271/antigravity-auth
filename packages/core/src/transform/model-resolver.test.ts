@@ -64,7 +64,7 @@ describe('resolveModelWithTier', () => {
     it('antigravity-gemini-3.5-flash-high uses the live high-tier Antigravity model', () => {
       const result = resolveModelWithTier('antigravity-gemini-3.5-flash-high')
       expect(result.actualModel).toBe('gemini-3-flash-agent')
-      expect(result.thinkingBudget).toBe(10000)
+      expect(result.thinkingBudget).toBe(-1)
       expect(result.thinkingLevel).toBeUndefined()
       expect(result.quotaPreference).toBe('antigravity')
     })
@@ -96,7 +96,7 @@ describe('resolveModelWithTier', () => {
       [
         'antigravity-gemini-3.6-flash-high',
         'gemini-3.6-flash-high',
-        10000,
+        -1,
         'high',
       ],
     ])('maps %s to the captured AGY route', (requestedModel, actualModel, thinkingBudget, tier) => {

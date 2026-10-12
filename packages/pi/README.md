@@ -51,8 +51,12 @@ The extension registers the Antigravity model catalog under the
 - `antigravity-gemini-3.6-flash`
 - `antigravity-gemini-3.5-flash`
 - `antigravity-gemini-3.1-pro`
-- `antigravity-claude-sonnet-4-6-thinking`
-- `antigravity-claude-opus-4-6-thinking`
+- `antigravity-claude-sonnet-5-5`
+- `antigravity-claude-opus-5-5`
+
+Claude 5.5 supports low, medium and high effort, a 1,000,000-token context and
+128,000-token output limit. Retired Claude 4.6 requests refuse before credential
+acquisition or transport; they are not redirected to 5.5.
 - `antigravity-gpt-oss-120b-medium`
 
 The image-generation model is currently OpenCode-only because Pi's provider event

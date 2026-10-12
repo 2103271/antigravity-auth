@@ -624,7 +624,7 @@ function okJson(): Response {
 
 const NON_STREAM_URL = modelUrl('gemini-3-flash', 'generateContent')
 const STREAM_URL = modelUrl('gemini-3-flash')
-const CLAUDE_URL = modelUrl('claude-sonnet-4-6', 'generateContent')
+const CLAUDE_URL = modelUrl('claude-sonnet-5-5-low', 'generateContent')
 
 describe('createRequestExecutor retry contract', () => {
   it('tries the Antigravity endpoints in fallback order after a 404', async () => {
@@ -2872,6 +2872,65 @@ describe('OpenCode 1 runtime replacement with admitted streams', () => {
       releaseRefresh()
       await queue.dispose()
       await lifecycle.dispose()
+    }
+  })
+})
+
+describe('retired Claude admission', () => {
+  it('refuses user selections before selection, refresh, warmup or physical send', async () => {
+    const h = harness({
+      config: { thinking_warmup: true, cache_warmup_on_switch: true },
+      respond: async () => okJson(),
+    })
+    const executor = createRequestExecutor(h.deps)
+    try {
+      for (const model of [
+        'claude-sonnet-4-6',
+        'antigravity-claude-opus-4-6-thinking-high',
+        'gemini-claude-sonnet-4-6-thinking',
+      ]) {
+        const response = await executor.execute(modelUrl(model), CHAT_INIT(), {
+          kind: 'primary',
+        })
+        expect(response.status).toBe(412)
+        const body = await response.text()
+        expect(JSON.parse(body)).toEqual({
+          error: {
+            code: 412,
+            status: 'FAILED_PRECONDITION',
+            message:
+              'This Antigravity model is no longer offered. Choose another model.',
+          },
+        })
+        expect(body).not.toMatch(/429|500|502|503|504|524/)
+      }
+      expect(h.calls).toHaveLength(0)
+      expect(h.refreshed).toHaveLength(0)
+      expect(h.checkedGrants).toHaveLength(0)
+    } finally {
+      await executor.dispose()
+    }
+  })
+
+  it('routes title work from a retired selection to a current server-offered route', async () => {
+    const h = harness({ respond: async () => okJson() })
+    const executor = createRequestExecutor(h.deps)
+    try {
+      const response = await executor.execute(
+        modelUrl('antigravity-claude-opus-4-6-thinking'),
+        CHAT_INIT(),
+        { kind: 'title' },
+      )
+      expect(response.status).toBe(200)
+      await response.text()
+      expect(h.calls).toHaveLength(1)
+      const call = h.calls[0]
+      if (!call?.init) throw new Error('Missing title dispatch')
+      const body = JSON.parse(String(call.init.body))
+      expect(body.model).toBe('gemini-3.5-flash-extra-low')
+      expect(body.request.labels.model_enum).toBe('MODEL_PLACEHOLDER_M187')
+    } finally {
+      await executor.dispose()
     }
   })
 })

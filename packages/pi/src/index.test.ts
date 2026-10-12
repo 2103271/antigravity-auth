@@ -123,7 +123,28 @@ it('replaces the native Google catalog and reads only the google OAuth credentia
     const models = registry
       .getAll()
       .filter((model) => model.provider === 'google')
-    expect(models).toHaveLength(8)
+    expect(models.map((model) => model.id).sort()).toEqual([
+      'antigravity-claude-opus-5-5',
+      'antigravity-claude-sonnet-5-5',
+      'antigravity-gemini-3.1-pro',
+      'antigravity-gemini-3.5-flash',
+      'antigravity-gemini-3.6-flash',
+      'antigravity-gemini-3.7-flash',
+      'antigravity-gemini-3.8-flash',
+      'antigravity-gpt-oss-120b-medium',
+    ])
+    for (const family of ['opus', 'sonnet']) {
+      expect(
+        registry.find('google', `antigravity-claude-${family}-5-5`),
+      ).toMatchObject({
+        reasoning: true,
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      })
+      expect(
+        registry.find('google', `antigravity-claude-${family}-4-6-thinking`),
+      ).toBeUndefined()
+    }
     expect(models.every((model) => model.id.startsWith('antigravity-'))).toBe(
       true,
     )

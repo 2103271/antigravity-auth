@@ -140,11 +140,13 @@ The model registry lives at `packages/core/src/model-registry.ts`; the OpenCode 
 | `antigravity-gemini-3.5-flash` | `low`, `high` | `gemini-flash` |
 | `antigravity-gemini-3.1-pro` | `low`, `high` | `gemini-pro` |
 | `antigravity-gemini-3.1-flash-image` | — | `gemini-flash` |
-| `antigravity-claude-sonnet-4-6-thinking` | — | `claude` |
-| `antigravity-claude-opus-4-6-thinking` | — | `claude` |
+| `antigravity-claude-sonnet-5-5` | low / medium / high | `claude` |
+| `antigravity-claude-opus-5-5` | low / medium / high | `claude` |
 | `antigravity-gpt-oss-120b-medium` | — | `gpt-oss` |
 
-> Gemini 3.8 Flash Cyber is restricted to Fairwind trusted defenders and is absent from the AGY 1.1.24 model catalog, so it is not exposed by this plugin. Gemini 3.5 Flash-Lite is also absent from the AGY catalog, and Gemini 3.5 Flash Cyber remains restricted to a limited-access CodeMender pilot.
+> Claude 5.5 has a 1,000,000-token context and 128,000-token output limit, with adaptive thinking. Claude 4.6 requests refuse rather than redirecting to a different model.
+
+> Gemini 3.8 Flash Cyber is absent from the captured AGY 1.3.3 server catalog, so it is not exposed by this plugin. Gemini 3.5 Flash-Lite is also absent from the AGY catalog, and Gemini 3.5 Flash Cyber remains restricted to a limited-access CodeMender pilot.
 
 ### Routing
 

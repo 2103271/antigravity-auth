@@ -21,6 +21,10 @@ import {
   Type,
 } from '@earendil-works/pi-ai'
 import type { ProviderConfig } from '@earendil-works/pi-coding-agent'
+import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent'
+import opusLow from '../../../test-fixtures/agy-cli-1.3.3/native-opus-low.json'
+import sonnetLow from '../../../test-fixtures/agy-cli-1.3.3/native-sonnet-low.json'
+import schemaDerived from '../../../test-fixtures/agy-cli-1.3.3/schema-derived-thinking.json'
 
 const ensureProjectContextMock = mock(async () => ({
   auth: {
@@ -524,6 +528,99 @@ afterEach(() => {
 })
 
 describe('resolvePiAntigravityModel', () => {
+  it('prepares captured low and schema-derived efforts using genuine Pi registration models', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agy-133-pi-catalog-'))
+    try {
+      const runtime = await ModelRuntime.create({
+        authPath: join(root, 'auth.json'),
+        modelsPath: null,
+        allowModelNetwork: false,
+        refreshOnCreate: false,
+      })
+      const registry = new ModelRegistry(runtime)
+      const { registerCortexKitPiAntigravity } = await import('./index.ts')
+      await registerCortexKitPiAntigravity(
+        {
+          registerProvider: registry.registerProvider.bind(registry),
+          registerCommand: mock(),
+        },
+        {
+          vaultDir: join(root, 'vault'),
+          modeFile: join(root, 'mode.json'),
+          readHostSlot: () => undefined,
+        },
+      )
+      for (const fixture of [opusLow, sonnetLow]) {
+        const id = `antigravity-${fixture.model.replace(/-low$/, '')}`
+        const model = registry.find('google', id)
+        if (!model) throw new Error(`Missing registered model: ${id}`)
+        expect(model).toMatchObject({
+          reasoning: true,
+          contextWindow: 1000000,
+          maxTokens: 128000,
+        })
+        for (const effort of [undefined, 'low', 'medium', 'high'] as const) {
+          fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
+            sseResponse([
+              'data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}]}}\n\n',
+            ]),
+          )
+          const result = await collectStream(
+            streamCortexKitAntigravity(model, userContext(), {
+              apiKey: 'test-token',
+              reasoning: effort,
+              sessionId: `registered-${id}-${effort}`,
+            }),
+          )
+          expect(result.result.stopReason).toBe('stop')
+          const call = fetchWithAgyCliTransportMock.mock.calls.at(-1)
+          const body = JSON.parse(String(call?.[1]?.body))
+          const level = effort ?? 'low'
+          expect(body.model).toBe(fixture.model.replace(/-low$/, `-${level}`))
+          expect(body.request.generationConfig).toEqual(
+            level === 'low'
+              ? fixture.native_generation_config
+              : {
+                  maxOutputTokens: 128000,
+                  thinkingConfig: schemaDerived[level],
+                },
+          )
+          expect(body.request.labels.model_enum).toBe(
+            actualCore.getAgyModelEnum(body.model),
+          )
+          expect(Object.keys(body)).toEqual(fixture.envelope_keys)
+          expect(new Headers(call?.[1]?.headers).get('User-Agent')).toMatch(
+            /^antigravity\/cli\/1\.3\.3 .*cl=996823801;/,
+          )
+        }
+        fetchWithAgyCliTransportMock.mockImplementationOnce(async () =>
+          sseResponse([
+            'data: {"response":{"candidates":[{"content":{"parts":[{"text":"capped"}]},"finishReason":"STOP"}]}}\n\n',
+          ]),
+        )
+        const beforeCap = fetchWithAgyCliTransportMock.mock.calls.length
+        const capped = await collectStream(
+          streamCortexKitAntigravity(model, userContext(), {
+            apiKey: 'test-token',
+            reasoning: 'low',
+            maxTokens: 2048,
+          }),
+        )
+        expect(capped.result.stopReason).toBe('stop')
+        expect(fetchWithAgyCliTransportMock.mock.calls.length).toBe(
+          beforeCap + 1,
+        )
+        const body = JSON.parse(
+          String(fetchWithAgyCliTransportMock.mock.calls.at(-1)?.[1]?.body),
+        )
+        expect(body.request.generationConfig).toEqual(
+          fixture.as_sent_generation_config,
+        )
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15000)
   const gemini36 = {
     ...fakeModel(),
     id: 'antigravity-gemini-3.6-flash',
@@ -533,7 +630,7 @@ describe('resolvePiAntigravityModel', () => {
   it.each([
     ['low', 'gemini-3.6-flash-low', 1000],
     ['medium', 'gemini-3.6-flash-medium', 4000],
-    ['high', 'gemini-3.6-flash-high', 10000],
+    ['high', 'gemini-3.6-flash-high', -1],
   ] as const)('maps Pi %s thinking to the captured AGY route', (reasoning, actualModel, thinkingBudget) => {
     expect(resolvePiAntigravityModel(gemini36, reasoning)).toMatchObject({
       actualModel,
@@ -857,7 +954,7 @@ describe('streamCortexKitAntigravity', () => {
 
   it('streams thinking and transfers a pending signature to visible text', async () => {
     const { events, result } = await runStream(
-      fakeModel('antigravity-claude-opus-4-6-thinking'),
+      fakeModel('antigravity-claude-opus-5-5'),
       sseResponse([
         'data: {"response":{"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true}]}}]}}\n\n',
         'data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"SIG123"}]}}]}}\n\n',
@@ -906,7 +1003,7 @@ describe('streamCortexKitAntigravity', () => {
     })
     expect(body.request.labels.model_enum).toBe('MODEL_PLACEHOLDER_M298')
     expect(call?.[1]?.headers?.['User-Agent']).toContain(
-      'antigravity/cli/1.1.24',
+      'antigravity/cli/1.3.3',
     )
   })
 
@@ -933,7 +1030,7 @@ describe('streamCortexKitAntigravity', () => {
     })
     expect(body.request.labels.model_enum).toBe('MODEL_PLACEHOLDER_M318')
     expect(call?.[1]?.headers?.['User-Agent']).toContain(
-      'antigravity/cli/1.1.24',
+      'antigravity/cli/1.3.3',
     )
   })
 
@@ -1045,14 +1142,14 @@ describe('streamCortexKitAntigravity', () => {
 
   it('does not rotate execution metadata on a tool-call turn', async () => {
     await runStream(
-      fakeModel('antigravity-claude-opus-4-6-thinking'),
+      fakeModel('antigravity-claude-opus-5-5'),
       sseResponse([
         'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{},"id":"c1"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}}\n\n',
       ]),
       'tool-execution-metadata',
     )
     await runStream(
-      fakeModel('antigravity-claude-opus-4-6-thinking'),
+      fakeModel('antigravity-claude-opus-5-5'),
       sseResponse([
         'data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}}\n\n',
       ]),
@@ -1071,7 +1168,7 @@ describe('streamCortexKitAntigravity', () => {
       'data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}}\n\n',
     )
     const { result } = await runStream(
-      fakeModel('antigravity-claude-opus-4-6-thinking'),
+      fakeModel('antigravity-claude-opus-5-5'),
       open.response,
       'open-response-cleanup',
     )
@@ -1588,5 +1685,47 @@ describe('vault native-slot admission', () => {
     expect(String(init?.body)).toContain('synthetic-served-project')
     expect(String(init?.body)).not.toContain('antigravity-vault-custody')
     expect(ensureProjectContextMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('retired Claude requests', () => {
+  it('refuses local requests before project discovery or physical transport', async () => {
+    const observed = await collectStream(
+      streamCortexKitAntigravity(
+        fakeModel('antigravity-claude-opus-4-6-thinking'),
+        userContext(),
+        { apiKey: 'test-token', sessionId: 'retired-local' },
+      ),
+    )
+    expect(observed.result.stopReason).toBe('error')
+    expect(observed.result.errorMessage).toBe(
+      'This Antigravity model is no longer offered. Choose another model.',
+    )
+    expect(ensureProjectContextMock).not.toHaveBeenCalled()
+    expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses vault requests before obtaining a credential', async () => {
+    const send = mock(async () => {
+      throw new Error('Unexpected vault credential acquisition')
+    })
+    const stream = createCortexKitAntigravityVaultStream(
+      send,
+      'synthetic-placeholder',
+    )
+    const observed = await collectStream(
+      stream(
+        fakeModel('antigravity-claude-sonnet-4-6-thinking'),
+        userContext(),
+        { apiKey: 'synthetic-placeholder', sessionId: 'retired-vault' },
+      ),
+    )
+    expect(observed.result.stopReason).toBe('error')
+    expect(observed.result.errorMessage).toBe(
+      'This Antigravity model is no longer offered. Choose another model.',
+    )
+    expect(send).not.toHaveBeenCalled()
+    expect(ensureProjectContextMock).not.toHaveBeenCalled()
+    expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
   })
 })

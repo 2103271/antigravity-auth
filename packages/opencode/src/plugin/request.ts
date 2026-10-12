@@ -1,5 +1,10 @@
 import crypto from 'node:crypto'
 import {
+  applyAgyNativeGenerationConfig,
+  getAgyNativeModel,
+  isRetiredAgyModel,
+} from '@cortexkit/antigravity-auth-core'
+import {
   ANTIGRAVITY_DEFAULT_PROJECT_ID,
   ANTIGRAVITY_ENDPOINT,
   CLAUDE_DESCRIPTION_PROMPT,
@@ -197,6 +202,8 @@ export function getImageModelLocalTitle(
 }
 
 function getAgyMaxOutputTokens(model: string): number | undefined {
+  const native = getAgyNativeModel(model)
+  if (native) return native.maxOutputTokens
   const lower = model.toLowerCase()
   if (
     lower === 'gemini-3.5-flash-low' ||
@@ -232,6 +239,10 @@ function applyAgyGenerationDefaults(
   headerStyle: HeaderStyle,
 ): void {
   if (headerStyle !== 'antigravity') {
+    return
+  }
+  if (getAgyNativeModel(model)) {
+    applyAgyNativeGenerationConfig(model, generationConfig)
     return
   }
   const maxOutputTokens = getAgyMaxOutputTokens(model)
@@ -1730,6 +1741,16 @@ function prepareAntigravityRequestIn(
         const wireRequest = requestObjects.at(-1)
         if (wireRequest) {
           if (headerStyle === 'antigravity') {
+            const generationConfig = wireRequest.generationConfig
+            const config =
+              generationConfig &&
+              typeof generationConfig === 'object' &&
+              !Array.isArray(generationConfig)
+                ? (generationConfig as Record<string, unknown>)
+                : {}
+            applyAgyNativeGenerationConfig(effectiveModel, config)
+            if (Object.keys(config).length > 0)
+              wireRequest.generationConfig = config
             const metadata = buildAgyAgentRequestMetadata(
               options?.agySession ?? DEFAULT_AGY_REQUEST_SESSION,
               wireRequest,
@@ -1784,8 +1805,12 @@ function prepareAntigravityRequestIn(
         // resolve the requested variant. It is never part of the Google wire schema.
         delete requestPayload.providerOptions
 
-        if (variantConfig?.thinkingLevel && isGemini3) {
-          // Gemini 3 native format - use thinkingLevel directly
+        if (
+          variantConfig?.thinkingLevel &&
+          (isGemini3 ||
+            getAgyNativeModel(effectiveModel)?.supportsAdaptiveThinking)
+        ) {
+          // Host effort variants select the corresponding native wire route.
           const variantModelBase = rawModel
             .replace(/-preview-customtools$/i, '')
             .replace(/-preview$/i, '')
@@ -2503,6 +2528,16 @@ function prepareAntigravityRequestIn(
         stripInjectedDebugFromRequestPayload(requestPayload)
         sanitizeRequestPayloadForAntigravity(requestPayload)
         if (headerStyle === 'antigravity') {
+          const generationConfig = requestPayload.generationConfig
+          const config =
+            generationConfig &&
+            typeof generationConfig === 'object' &&
+            !Array.isArray(generationConfig)
+              ? (generationConfig as Record<string, unknown>)
+              : {}
+          applyAgyNativeGenerationConfig(effectiveModel, config)
+          if (Object.keys(config).length > 0)
+            requestPayload.generationConfig = config
           stripUnsupportedAntigravityFields(requestPayload)
           configureAntigravityToolCalling(requestPayload)
           // Function-response roles depend on the signatures settled by the
@@ -2666,8 +2701,10 @@ export function buildThinkingWarmupBody(
 
   const warmupPrompt = 'Warmup request for thinking signature.'
 
-  const wireModel =
-    typeof parsed.model === 'string' ? parsed.model : 'claude-sonnet-4-6'
+  const candidate = typeof parsed.model === 'string' ? parsed.model : ''
+  if (candidate && isRetiredAgyModel(candidate)) return null
+  const wireModel = candidate || 'claude-sonnet-5-5-low'
+  parsed.model = wireModel
   const requestObjects: Record<string, unknown>[] = []
   const updateRequest = (req: Record<string, unknown>) => {
     req.contents = [{ role: 'user', parts: [{ text: warmupPrompt }] }]
@@ -2682,9 +2719,11 @@ export function buildThinkingWarmupBody(
       includeThoughts: true,
       thinkingBudget: AGY_CLAUDE_THINKING_BUDGET,
     }
-    generationConfig.maxOutputTokens =
+    generationConfig.maxOutputTokens ??=
+      generationConfig.max_output_tokens ??
       getAgyMaxOutputTokens(wireModel) ??
       computeClaudeMaxOutputTokens(AGY_CLAUDE_THINKING_BUDGET)
+    applyAgyNativeGenerationConfig(wireModel, generationConfig)
     req.generationConfig = generationConfig
     requestObjects.push(req)
   }

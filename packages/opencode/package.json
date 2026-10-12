@@ -1,7 +1,7 @@
 {
   "name": "@cortexkit/opencode-antigravity-auth",
-  "version": "3.0.0",
-  "description": "Google Antigravity OAuth auth plugin for OpenCode - access Gemini 3 and Claude 4.6 using Google credentials",
+  "version": "3.0.1",
+  "description": "Google Antigravity OAuth auth plugin for OpenCode - access Gemini and Claude models using Google credentials",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "type": "module",
@@ -129,7 +129,7 @@
     "zod-to-json-schema": "^3.25.1"
   },
   "dependencies": {
-    "@cortexkit/antigravity-auth-core": "3.0.0",
+    "@cortexkit/antigravity-auth-core": "3.0.1",
     "jsonc-parser": "^3.3.1",
     "xdg-basedir": "^5.1.0",
     "zod": "^4.0.0"

@@ -2,12 +2,15 @@ import {
   type AgyRequestScope,
   AgyRequestSessionStore,
   ANTIGRAVITY_ENDPOINT,
+  applyAgyNativeGenerationConfig,
   buildAgyAgentRequestMetadata,
   buildAntigravityHarnessUserAgent,
   ensureProjectContext,
   fetchWithAgyCliTransport,
   forwardAbort,
+  isRetiredAgyModel,
   orderAgyRequestPayloadInPlace,
+  RETIRED_AGY_MODEL_MESSAGE,
   redactCredentialError,
   redactCredentialText,
   resolveModelForHeaderStyle,
@@ -331,7 +334,8 @@ export function resolvePiAntigravityModel(
   const supportsAgyTiers =
     model.reasoning &&
     (lower.includes('gemini-3') ||
-      (lower.includes('claude') && lower.includes('thinking')))
+      (lower.includes('claude') &&
+        (lower.includes('thinking') || /claude-(opus|sonnet)-5-5/.test(lower))))
 
   if (!supportsAgyTiers || !reasoning) {
     return resolveModelForHeaderStyle(model.id, 'antigravity')
@@ -370,11 +374,16 @@ function prepareAntigravityRequest(options: {
     options.streamOptions?.reasoning,
   )
   const wireModel = resolved.actualModel
+  if (isRetiredAgyModel(options.model.id) || isRetiredAgyModel(wireModel)) {
+    throw new Error(RETIRED_AGY_MODEL_MESSAGE)
+  }
 
-  const request = buildGeminiRequest(options.context, {
-    provider: options.model.provider,
-    model: options.model.id,
-  }) as unknown as Record<string, unknown>
+  const request: Record<string, unknown> = {
+    ...buildGeminiRequest(options.context, {
+      provider: options.model.provider,
+      model: options.model.id,
+    }),
+  }
   const generationConfig: Record<string, unknown> = {}
 
   if (resolved.thinkingLevel) {
@@ -393,6 +402,7 @@ function prepareAntigravityRequest(options: {
   if (typeof maxTokens === 'number') {
     generationConfig.maxOutputTokens = maxTokens
   }
+  applyAgyNativeGenerationConfig(wireModel, generationConfig)
 
   if (Object.keys(generationConfig).length > 0) {
     request.generationConfig = generationConfig
@@ -450,6 +460,9 @@ async function sendAntigravityRequest(options: {
   signal?: AbortSignal
   assertAdmission?: () => Promise<void>
 }): Promise<Response> {
+  if (isRetiredAgyModel(options.model.id)) {
+    throw new Error(RETIRED_AGY_MODEL_MESSAGE)
+  }
   // Pi passes only the access token; the packed refresh
   // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
   // the managed project without a loadCodeAssist call per turn.

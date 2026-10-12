@@ -1194,19 +1194,17 @@ describe('model registration', () => {
   })
 
   it('never offers a disabled variant', () => {
-    const disabled = Object.entries(
-      realCore.getPublicModelDefinitions(),
-    ).flatMap(([id, definition]) =>
-      Object.entries(definition.variants ?? {})
-        .filter(([, variant]) => variant.disabled === true)
-        .map(([variantID]) => [id, variantID] as const),
-    )
-    expect(disabled.length).toBeGreaterThan(0)
-    for (const [id, variantID] of disabled) {
-      expect(
-        catalog.get(id)?.variants.some((variant) => variant.id === variantID),
-      ).toBe(false)
-    }
+    const definition = Object.values(realCore.getPublicModelDefinitions())[0]
+    if (!definition) throw new Error('Missing source model definition')
+    const info = server.toGaModelInfo('disabled-variant-probe', {
+      ...definition,
+      variants: {
+        low: { thinkingLevel: 'low' },
+        excluded: { thinkingLevel: 'high', disabled: true },
+      },
+    })
+    const variantIDs: string[] = info.variants.map((variant) => variant.id)
+    expect(variantIDs).toEqual(['low'])
   })
 
   it('keeps the provider’s other models and replaces only catalog ids', () => {

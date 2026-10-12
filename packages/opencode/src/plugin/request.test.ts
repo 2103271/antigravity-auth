@@ -1,5 +1,8 @@
 import { describe, expect, it, spyOn } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import opusLow from '../../../../test-fixtures/agy-cli-1.3.3/native-opus-low.json'
+import sonnetLow from '../../../../test-fixtures/agy-cli-1.3.3/native-sonnet-low.json'
+import schemaDerived from '../../../../test-fixtures/agy-cli-1.3.3/schema-derived-thinking.json'
 import { SKIP_THOUGHT_SIGNATURE } from '../constants'
 import * as config from './config'
 import { DEFAULT_CONFIG } from './config'
@@ -10,6 +13,7 @@ import type {
   ThoughtBuffer,
 } from './core/streaming/types'
 import { initializeDebug } from './debug'
+import { generateFingerprint } from './fingerprint'
 import {
   __testExports,
   buildThinkingWarmupBody,
@@ -1014,6 +1018,102 @@ describe('request.ts', () => {
     const mockAccessToken = 'test-token'
     const mockProjectId = 'test-project'
 
+    it('prepares both captured Claude low configurations through host variants and current persisted headers', () => {
+      for (const fixture of [opusLow, sonnetLow]) {
+        const fingerprint = generateFingerprint()
+        fingerprint.userAgent = 'antigravity/cli/1.1.24 (historical account)'
+        const previous = structuredClone(fingerprint)
+        const selector = `antigravity-${fixture.model.replace(/-low$/, '')}`
+        const result = prepareAntigravityRequest(
+          `https://generativelanguage.googleapis.com/v1beta/models/${selector}:streamGenerateContent`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+              providerOptions: { google: { thinkingLevel: 'low' } },
+            }),
+          },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          'antigravity',
+          false,
+          { fingerprint },
+        )
+        const body = JSON.parse(String(result.init.body))
+        expect(body.model).toBe(fixture.model)
+        expect(body.request.generationConfig).toEqual(
+          fixture.native_generation_config,
+        )
+        expect(body.request.labels.model_enum).toBe(fixture.native_model_enum)
+        expect(Object.keys(body)).toEqual(fixture.envelope_keys)
+        expect(body.request.providerOptions).toBeUndefined()
+        expect(new Headers(result.init.headers).get('User-Agent')).toMatch(
+          /^antigravity\/cli\/1\.3\.3 .*cl=996823801;/,
+        )
+        expect(fingerprint).toEqual(previous)
+      }
+    })
+
+    it('preserves explicit Claude output caps in plain and wrapped requests', () => {
+      for (const fixture of [opusLow, sonnetLow]) {
+        for (const cap of [1, 2048]) {
+          for (const wrapped of [false, true]) {
+            for (const key of ['maxOutputTokens', 'max_output_tokens']) {
+              const request = {
+                contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+                generationConfig: { [key]: cap },
+              }
+              const result = prepareAntigravityRequest(
+                `https://generativelanguage.googleapis.com/v1beta/models/antigravity-${fixture.model}:generateContent`,
+                {
+                  method: 'POST',
+                  body: JSON.stringify(
+                    wrapped ? { project: mockProjectId, request } : request,
+                  ),
+                },
+                mockAccessToken,
+                mockProjectId,
+              )
+              const body = JSON.parse(String(result.init.body))
+              expect(body.request.generationConfig).toEqual({
+                ...fixture.native_generation_config,
+                maxOutputTokens: cap,
+              })
+            }
+          }
+        }
+      }
+    })
+
+    it('routes Claude host medium/high variants with schema-derived thinking', () => {
+      for (const family of ['opus', 'sonnet']) {
+        for (const effort of ['medium', 'high'] as const) {
+          const result = prepareAntigravityRequest(
+            `https://generativelanguage.googleapis.com/v1beta/models/antigravity-claude-${family}-5-5:generateContent`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+                providerOptions: { google: { thinkingLevel: effort } },
+              }),
+            },
+            mockAccessToken,
+            mockProjectId,
+          )
+          const body = JSON.parse(String(result.init.body))
+          expect(body.model).toBe(`claude-${family}-5-5-${effort}`)
+          expect(body.request.generationConfig).toEqual({
+            maxOutputTokens: 128000,
+            thinkingConfig: schemaDerived[effort],
+          })
+          expect(body.request.labels.model_enum).toBe(
+            `MODEL_PLACEHOLDER_M${family === 'opus' ? (effort === 'medium' ? 401 : 402) : effort === 'medium' ? 404 : 405}`,
+          )
+        }
+      }
+    })
+
     it('returns unchanged request for non-generative-language URLs', () => {
       const result = prepareAntigravityRequest(
         'https://example.com/api',
@@ -1514,10 +1614,10 @@ describe('request.ts', () => {
       [
         'antigravity-gemini-3.6-flash-high',
         'gemini-3.6-flash-high',
-        10000,
+        -1,
         'MODEL_PLACEHOLDER_M71',
       ],
-    ])('builds the captured AGY 1.1.6 request for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
+    ])('uses current catalog thinking with the historical Gemini 3.6 enum and caller cap for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
       const result = prepareAntigravityRequest(
         `https://generativelanguage.googleapis.com/v1beta/models/${requestedModel}:generateContent`,
         {
@@ -1539,7 +1639,7 @@ describe('request.ts', () => {
       expect(result.effectiveModel).toBe(wireModel)
       expect(wrapped.model).toBe(wireModel)
       expect(wrapped.request.generationConfig).toMatchObject({
-        maxOutputTokens: 65536,
+        maxOutputTokens: 1024,
         thinkingConfig: { includeThoughts: true, thinkingBudget },
       })
       expect(
@@ -1573,7 +1673,7 @@ describe('request.ts', () => {
         -1,
         'MODEL_PLACEHOLDER_M298',
       ],
-    ])('builds the captured AGY 1.1.13 request for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
+    ])('preserves the captured Gemini 3.7 enum and caller cap for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
       const result = prepareAntigravityRequest(
         `https://generativelanguage.googleapis.com/v1beta/models/${requestedModel}:generateContent`,
         {
@@ -1595,7 +1695,7 @@ describe('request.ts', () => {
       expect(result.effectiveModel).toBe(wireModel)
       expect(wrapped.model).toBe(wireModel)
       expect(wrapped.request.generationConfig).toMatchObject({
-        maxOutputTokens: 65536,
+        maxOutputTokens: 1024,
         thinkingConfig: { includeThoughts: true, thinkingBudget },
       })
       expect(
@@ -1629,7 +1729,7 @@ describe('request.ts', () => {
         -1,
         'MODEL_PLACEHOLDER_M318',
       ],
-    ])('builds the captured AGY 1.1.24 request for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
+    ])('preserves the captured Gemini 3.8 enum and caller cap for %s', (requestedModel, wireModel, thinkingBudget, modelEnum) => {
       const result = prepareAntigravityRequest(
         `https://generativelanguage.googleapis.com/v1beta/models/${requestedModel}:generateContent`,
         {
@@ -1651,7 +1751,7 @@ describe('request.ts', () => {
       expect(result.effectiveModel).toBe(wireModel)
       expect(wrapped.model).toBe(wireModel)
       expect(wrapped.request.generationConfig).toMatchObject({
-        maxOutputTokens: 65536,
+        maxOutputTokens: 1024,
         thinkingConfig: { includeThoughts: true, thinkingBudget },
       })
       expect(
@@ -2522,7 +2622,7 @@ describe('request.ts', () => {
           generationConfig: {},
           sessionId: '-3750763034362895579',
         },
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5-5-low',
         userAgent: 'antigravity',
         requestType: 'agent',
       })
@@ -2537,12 +2637,17 @@ describe('request.ts', () => {
       expect(warmup.request.tools).toBeUndefined()
       expect(warmup.request.toolConfig).toBeUndefined()
       expect(warmup.request.labels.last_step_index).toBe('1')
-      expect(warmup.request.labels.model_enum).toBe('MODEL_PLACEHOLDER_M35')
+      expect(warmup.model).toBe('claude-sonnet-5-5-low')
+      expect(warmup.request.labels.model_enum).toBe('MODEL_PLACEHOLDER_M403')
       expect(warmup.request.labels.trajectory_id).not.toBe('main-trajectory')
       expect(warmup.request.sessionId).toBe('-3750763034362895579')
       expect(warmup.request.generationConfig).toEqual({
-        thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 },
-        maxOutputTokens: 64000,
+        thinkingConfig: {
+          includeThoughts: true,
+          thinkingBudget: 0,
+          thinkingLevel: 'LOW',
+        },
+        maxOutputTokens: 128000,
       })
     })
   })
@@ -2660,6 +2765,36 @@ describe('request.ts', () => {
           'session-1',
         ),
       ).rejects.toMatchObject({ message: 'THINKING_RECOVERY_NEEDED' })
+    })
+  })
+})
+
+describe('current Claude warmup admission', () => {
+  it('does not replace a retired explicit target with another Claude family', () => {
+    expect(
+      buildThinkingWarmupBody(
+        JSON.stringify({ model: 'claude-sonnet-4-6', request: {} }),
+        true,
+      ),
+    ).toBeNull()
+  })
+
+  it('preserves an explicit output cap for an adaptive-thinking warmup', () => {
+    const body = buildThinkingWarmupBody(
+      JSON.stringify({
+        model: 'claude-sonnet-5-5-low',
+        request: { generationConfig: { maxOutputTokens: 2048 } },
+      }),
+      true,
+    )
+    expect(body).not.toBeNull()
+    expect(JSON.parse(body!).request.generationConfig).toEqual({
+      maxOutputTokens: 2048,
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingBudget: 0,
+        thinkingLevel: 'LOW',
+      },
     })
   })
 })

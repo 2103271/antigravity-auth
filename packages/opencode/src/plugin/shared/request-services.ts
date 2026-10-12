@@ -26,7 +26,9 @@ import {
   getPublicModelDefinitions,
   getResolverAliasMap,
   type HealthScoreTracker,
+  isClaudeThinkingModel,
   isImageGenerationModel,
+  isRetiredAgyModel,
   type ManagedAccount,
   type OAuthAuthDetails,
   type ProjectContextResult,
@@ -35,6 +37,7 @@ import {
   type QuotaGroup,
   type QuotaGroupSummary,
   type QuotaManager,
+  RETIRED_AGY_MODEL_MESSAGE,
   redactCredentialError,
   redactCredentialResponse,
   redactCredentialText,
@@ -509,7 +512,8 @@ export function routeTitleModel(url: string): string {
   const registered =
     Object.hasOwn(getPublicModelDefinitions(), model) ||
     Object.hasOwn(getResolverAliasMap(), model)
-  if (registered && !isImageGenerationModel(model)) return url
+  if (registered && !isImageGenerationModel(model) && !isRetiredAgyModel(model))
+    return url
   return url.replace(`/models/${model}`, `/models/${TITLE_FALLBACK_MODEL}`)
 }
 
@@ -855,6 +859,20 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     }
     if (kind === 'title') {
       input = routeTitleModel(input)
+    }
+
+    const selectedModel = extractModelFromUrl(input)
+    if (selectedModel && isRetiredAgyModel(selectedModel)) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 412,
+            status: 'FAILED_PRECONDITION',
+            message: RETIRED_AGY_MODEL_MESSAGE,
+          },
+        }),
+        { status: 412, headers: { 'Content-Type': 'application/json' } },
+      )
     }
 
     // A host that sends each request through its own raw sender (the GA
@@ -1598,10 +1616,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           typeof prepared.init.body === 'string'
             ? prepared.init.body
             : undefined,
-          Boolean(
-            prepared.effectiveModel?.toLowerCase().includes('claude') &&
-              prepared.effectiveModel?.toLowerCase().includes('thinking'),
-          ),
+          isClaudeThinkingModel(prepared.effectiveModel ?? ''),
         )
         if (!warmupBody) return
 
