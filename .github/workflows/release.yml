@@ -165,9 +165,6 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      - name: Ensure latest npm (for trusted publishing)
-        run: npm install -g npm@latest
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 

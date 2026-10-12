@@ -643,6 +643,21 @@ test('build.ga_map_admission_preserves_unowned', async () => {
     expect(await inventory(join(root, tree))).toEqual(['canary.js'])
 })
 
+test('release.preserves_tested_npm', async () => {
+  const workflow = await readFile(
+    join(repo, '.github/workflows/release.yml'),
+    'utf8',
+  )
+  const globalNpmChanges = workflow
+    .split('\n')
+    .filter((line) =>
+      /\bnpm\s+(?:install|i|update|upgrade)\b[^\n]*(?:--global|-g)\b/.test(
+        line,
+      ),
+    )
+  expect(globalNpmChanges).toEqual([])
+})
+
 test('build.prerequisite_order', async () => {
   for (const path of ['package.json', 'packages/opencode/package.json']) {
     const pkg = JSON.parse(await readFile(join(repo, path), 'utf8'))
