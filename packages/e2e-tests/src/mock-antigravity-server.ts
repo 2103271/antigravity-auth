@@ -44,6 +44,8 @@ export interface RecordedRequest {
 }
 
 export interface BaseFixture {
+  /** Match the exact method, raw endpoint, and synthetic bearer. */
+  match?: { method: string; endpoint: string; bearer: `Bearer ${string}` }
   /** Optional status override; default `200`. */
   status?: number
   /** Optional response headers. `content-type` defaults per fixture. */
@@ -285,7 +287,18 @@ export async function startMockAntigravityServer(): Promise<MockServerHandle> {
         receivedAt: Date.now(),
       })
 
-      const fixture = queue.shift()
+      // Prefer an exact scoped response; otherwise consume ordinary FIFO only.
+      // Unmatched scoped fixtures remain queued for their own requests.
+      const scopedIndex = queue.findIndex(
+        ({ match }) =>
+          match !== undefined &&
+          match.method === (request.method ?? 'GET') &&
+          match.endpoint === (request.url ?? '/') &&
+          match.bearer === headers.authorization,
+      )
+      const index =
+        scopedIndex >= 0 ? scopedIndex : queue.findIndex(({ match }) => !match)
+      const fixture = index < 0 ? undefined : queue.splice(index, 1)[0]
       if (!fixture) {
         sendJson(response, 500, {
           error: { code: 8, message: 'mock-queue-empty', status: 'INTERNAL' },
