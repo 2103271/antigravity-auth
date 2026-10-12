@@ -253,6 +253,9 @@ export const createAntigravityPlugin =
           ? ('vault' as const)
           : ('local' as const)
     }
+    const mayRunLocalAccounts = async () =>
+      (await readAuthority()) === 'local' &&
+      (await authLoader.accountStore()).status !== 'migration-required'
     const quotaManager = createOpenCodeQuotaManager(client, providerId, {
       // Route quota fetches through the injected transport so e2e and
       // custom-host deployments stay on the loopback/mock server for both
@@ -260,7 +263,7 @@ export const createAntigravityPlugin =
       // poller always hits the production Antigravity endpoint even when
       // the caller injected a mock transport.
       fetchVia: dependencies.agyTransport,
-      mayRun: async () => (await readAuthority()) === 'local',
+      mayRun: mayRunLocalAccounts,
       fetchStoreAccountQuota: async (account, request) => {
         const service = await currentStoreQuota()
         if (!service)
@@ -344,8 +347,16 @@ export const createAntigravityPlugin =
             : {}),
         }
       },
-      write: (state, ids) =>
-        setSidebarMachineState(state, { retainRoutingForAccountIds: ids }),
+      write: async (state, ids) => {
+        // Keep the existing account-state snapshot untouched until offline
+        // migration. Approved vault publication still uses its own accounts.
+        if (
+          (await readAuthority()) === 'local' &&
+          (await authLoader.accountStore()).status === 'migration-required'
+        )
+          return
+        await setSidebarMachineState(state, { retainRoutingForAccountIds: ids })
+      },
     })
     function scheduleSidebarPublication(): void {
       void sidebarPublisher.publish().catch((error) =>
@@ -406,7 +417,7 @@ export const createAntigravityPlugin =
     if (config.background_quota_refresh) {
       const poller = new BackgroundQuotaRefresh({
         publishSidebar: () => sidebarPublisher.publish(),
-        mayRun: async () => (await readAuthority()) === 'local',
+        mayRun: mayRunLocalAccounts,
         intervalMs: config.background_quota_refresh_interval_minutes * 60_000,
         sidebarStateFile: getSidebarStateFile(),
         getAccountManager: () => lifecycle.getAccountManager(),
@@ -415,7 +426,7 @@ export const createAntigravityPlugin =
         // the same token-refresh path as the quota manager without a separate
         // network seam -- tier is best-effort metadata, not quota.
         loadAccountTier: makeTierLoader(client, providerId, {
-          mayRun: async () => (await readAuthority()) === 'local',
+          mayRun: mayRunLocalAccounts,
           authorizeStore: async (account) => {
             const service = await currentStoreQuota()
             return service
@@ -679,10 +690,9 @@ export const createAntigravityPlugin =
     const accountAccess = createAccountAccessService({
       client,
       providerId,
-      // Before migration these are the pool file's operations. Once the
-      // account store is active, logins are admitted by its repository, the
-      // accounts are read from it, and pool-file edits are refused: the
-      // retired file is never read or written.
+      // The target resolver refuses an existing unmigrated pool. An active
+      // store supplies accounts through its repository, without reading or
+      // editing the retired file.
       store: {
         load: async () => {
           const source = await accountSource()
@@ -743,6 +753,7 @@ export const createAntigravityPlugin =
     })
     const authLoader = createAuthLoader({
       publishSidebar: () => sidebarPublisher.publish(),
+      fetchImpl: dependencies.fetchImpl,
       readAuthority,
       createVaultFetch: async () => {
         const { source, pool } = await currentVaultPool()
@@ -801,9 +812,8 @@ export const createAntigravityPlugin =
       // Google OAuth endpoints when adding an account.
       authorize: dependencies.oauth.authorize,
       exchange: dependencies.oauth.exchange,
-      // Once the account store is active a new login is admitted by the
-      // repository the runtime routes with; the retired pool file is never
-      // written or read. Before migration the pool file path is unchanged.
+      // New logins go through the same repository as request routing. An
+      // existing unmigrated pool is not a login target.
       persist: async (result) => {
         const target = await loginTarget()
         if (target === 'pool-file') {

@@ -10,10 +10,12 @@ import {
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   unlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -27,11 +29,13 @@ import {
 import * as packageRoot from '../index'
 
 import { ANTIGRAVITY_PROVIDER_ID } from './constants.ts'
+import type { BackgroundQuotaRefresh } from './plugin/background-quota-refresh'
 import { ANTIGRAVITY_MENU_COMMAND } from './plugin/commands.ts'
+import type { FetchImpl } from './plugin/dependencies'
 import { GEMINI_DUMP_COMMAND_NAME } from './plugin/gemini-dump.ts'
 import { createAntigravityPlugin } from './plugin/index'
 import { getStoragePath } from './plugin/storage'
-import type { PluginClient, PluginInput } from './plugin/types.ts'
+import type { PluginClient, PluginInput, Provider } from './plugin/types.ts'
 import { V1_VAULT_ACTIVATION_LABEL } from './plugin/vault-activation'
 import {
   createOpenCodeVaultCustody,
@@ -73,6 +77,140 @@ function createPluginInput(
     $: (() => {}) as unknown as PluginInput['$'],
   }
 }
+
+async function withUnmigratedComposition(
+  run: (
+    send: FetchImpl,
+    upstream: ReturnType<typeof mock<FetchImpl>>,
+  ) => Promise<void>,
+) {
+  const owned = realpathSync(mkdtempSync('/tmp/agy-unmigrated-composition-'))
+  const overrides = {
+    OPENCODE_CONFIG_DIR: join(owned, 'config'),
+    ANTIGRAVITY_AUTH_RPC_DIR: join(owned, 'rpc'),
+    ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE: join(owned, 'sidebar-state.json'),
+  }
+  const prior = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  )
+  Object.assign(process.env, overrides)
+  mkdirSync(overrides.OPENCODE_CONFIG_DIR)
+  writeFileSync(
+    getStoragePath(),
+    JSON.stringify({
+      version: 4,
+      accounts: [
+        {
+          refreshToken: 'synthetic-composition-refresh',
+          addedAt: 1,
+          lastUsed: 1,
+        },
+      ],
+      activeIndex: 0,
+    }),
+    { mode: 0o600 },
+  )
+  const upstream = mock<FetchImpl>(
+    async () => new Response('configured-upstream'),
+  )
+  const globalFetch = spyOn(globalThis, 'fetch').mockRejectedValue(
+    new Error('global passthrough must not run'),
+  )
+  let plugin:
+    | Awaited<ReturnType<ReturnType<typeof createAntigravityPlugin>>>
+    | undefined
+  try {
+    plugin = await createAntigravityPlugin('google', {
+      dependencies: { fetchImpl: upstream },
+    })(createPluginInput(createMinimalClient(), owned))
+    const provider: Provider = {
+      id: 'google',
+      name: 'Google',
+      source: 'custom',
+      env: [],
+      options: {},
+      models: {},
+    }
+    const loaded = await plugin.auth.loader(
+      async () => ({
+        type: 'oauth',
+        access: 'synthetic-composition-access',
+        refresh: 'synthetic-composition-refresh',
+        expires: Date.now() + 3600000,
+      }),
+      provider,
+    )
+    if (typeof loaded.fetch !== 'function')
+      throw new Error('Production composition supplied no delegating fetch')
+    await run(loaded.fetch, upstream)
+  } finally {
+    await plugin?.dispose?.()
+    globalFetch.mockRestore()
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(owned, { recursive: true, force: true })
+  }
+}
+
+it('unmigrated production composition preserves configured non-generative passthrough when global fetch refuses', async () => {
+  await withUnmigratedComposition(async (send, upstream) => {
+    const input = new Request(
+      'https://configured-upstream.invalid/non-generative',
+    )
+    const init = { headers: { 'x-configured': 'preserved' } }
+    const response = await send(input, init)
+    expect(await response.text()).toBe('configured-upstream')
+    expect(upstream).toHaveBeenCalledTimes(1)
+    expect(upstream).toHaveBeenCalledWith(input, init)
+  })
+})
+
+for (const override of ['live', 'null'] as const) {
+  it(`unmigrated production composition honors explicit ${override} init signal over an aborted Request`, async () => {
+    await withUnmigratedComposition(async (send, upstream) => {
+      const inherited = new AbortController()
+      inherited.abort(new Error('inherited request cancellation'))
+      const input = new Request(
+        'https://generativelanguage.googleapis.com/v1/models/example:streamGenerateContent',
+        { signal: inherited.signal },
+      )
+      const response = await send(input, {
+        signal: override === 'null' ? null : new AbortController().signal,
+      })
+      expect(response.status).toBe(412)
+      expect((await response.json()).error.message).toBe(
+        'Antigravity accounts require offline migration. Stop OpenCode, then run `npx @cortexkit/opencode-antigravity-auth@3.0.0 migrate --offline`.',
+      )
+      expect(upstream).not.toHaveBeenCalled()
+    })
+  })
+}
+
+it('unmigrated production composition retains inherited and explicit-aborted cancellation controls', async () => {
+  await withUnmigratedComposition(async (send, upstream) => {
+    const inherited = new AbortController()
+    const inheritedReason = new Error('inherited cancellation')
+    inherited.abort(inheritedReason)
+    await expect(
+      send(
+        new Request('https://generativelanguage.googleapis.com/example', {
+          signal: inherited.signal,
+        }),
+      ),
+    ).rejects.toBe(inheritedReason)
+    const explicit = new AbortController()
+    const explicitReason = new Error('explicit cancellation')
+    explicit.abort(explicitReason)
+    await expect(
+      send(new Request('https://generativelanguage.googleapis.com/example'), {
+        signal: explicit.signal,
+      }),
+    ).rejects.toBe(explicitReason)
+    expect(upstream).not.toHaveBeenCalled()
+  })
+})
 
 describe('createAntigravityPlugin (plugin entry surface)', () => {
   let tempProjectDir: string
@@ -232,6 +370,113 @@ describe('package root exports', () => {
     expect('authorizeAntigravity' in packageRoot).toBe(false)
     expect('exchangeAntigravity' in packageRoot).toBe(false)
   })
+})
+
+it('a real default background quota tick leaves an unmigrated pool and account-state sidecars untouched', async () => {
+  const owned = realpathSync(mkdtempSync('/tmp/agy-unmigrated-tick-'))
+  const overrides = {
+    OPENCODE_CONFIG_DIR: join(owned, 'config'),
+    ANTIGRAVITY_AUTH_RPC_DIR: join(owned, 'rpc'),
+    ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE: join(owned, 'sidebar-state.json'),
+  }
+  const prior = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  )
+  Object.assign(process.env, overrides)
+  mkdirSync(overrides.OPENCODE_CONFIG_DIR)
+  const pool = getStoragePath()
+  const bytes = JSON.stringify({
+    version: 4,
+    accounts: [{ refreshToken: 'synthetic-refresh', addedAt: 1, lastUsed: 1 }],
+    activeIndex: 0,
+  })
+  writeFileSync(pool, bytes, { mode: 0o600 })
+  const sidebarBytes =
+    '{"version":1,"checkedAt":0,"accounts":[],"routingAuthoritative":false,"activeRouting":{}}'
+  writeFileSync(overrides.ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE, sidebarBytes, {
+    mode: 0o600,
+  })
+  const upstream = spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response('not-found', { status: 404 }),
+  )
+  const transport = mock(
+    async () => new Response('unexpected physical send', { status: 500 }),
+  )
+  const changes: string[] = []
+  const watcher = watch(owned, (_event, name) => {
+    if (name?.toString().startsWith('sidebar-state'))
+      changes.push(name.toString())
+  })
+  const originalTimer = globalThis.setTimeout
+  let timerSpy: ReturnType<typeof spyOn> | undefined
+  let poller: BackgroundQuotaRefresh | undefined
+  let tickDone: () => void = () => {}
+  const tick = new Promise<void>((done) => {
+    tickDone = done
+  })
+  let plugin:
+    | Awaited<ReturnType<ReturnType<typeof createAntigravityPlugin>>>
+    | undefined
+  try {
+    plugin = await createAntigravityPlugin('google', {
+      dependencies: {
+        agyTransport: transport,
+        clock: { now: () => Date.now(), random: () => 0 },
+      },
+      _onPollerCreated(value) {
+        poller = value
+        // Wait for the background quota poller's next scheduled tick so its
+        // current tick finishes asynchronous admission and account-state lock
+        // work before disposal.
+        timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
+          handler: (...args: unknown[]) => void,
+          delay: number,
+          ...args: unknown[]
+        ) => {
+          if (delay === 300000) {
+            timerSpy?.mockRestore()
+            tickDone()
+          }
+          return originalTimer(() => {
+            handler(...args)
+          }, delay)
+        }) as typeof setTimeout)
+      },
+    })(createPluginInput(createMinimalClient(), owned))
+    expect(poller).toBeDefined()
+    await tick
+    await new Promise<void>((done) => setImmediate(done))
+    await poller!.dispose()
+    expect(changes).toEqual([])
+    expect(readFileSync(pool, 'utf8')).toBe(bytes)
+    expect(
+      readFileSync(overrides.ANTIGRAVITY_AUTH_SIDEBAR_STATE_FILE, 'utf8'),
+    ).toBe(sidebarBytes)
+    expect(
+      readdirSync(owned).filter((name) => name.startsWith('sidebar-state')),
+    ).toEqual(['sidebar-state.json'])
+    expect(
+      readdirSync(overrides.OPENCODE_CONFIG_DIR).filter((name) =>
+        name.startsWith('antigravity-accounts'),
+      ),
+    ).toEqual(['antigravity-accounts.json'])
+    expect(transport).not.toHaveBeenCalled()
+    expect(
+      upstream.mock.calls.filter(([input]) =>
+        /oauth2|cloudcode|generativelanguage/.test(String(input)),
+      ),
+    ).toEqual([])
+  } finally {
+    timerSpy?.mockRestore()
+    await plugin?.dispose?.()
+    upstream.mockRestore()
+    watcher.close()
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(owned, { recursive: true, force: true })
+  }
 })
 
 it('the production V1 entry opens the vault menu without opening or changing dormant local accounts', async () => {

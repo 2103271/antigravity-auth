@@ -26,6 +26,7 @@ import {
 } from './auth-drift'
 import type { AntigravityConfig } from './config'
 import { getLogFilePath, isDebugEnabled } from './debug'
+import type { FetchImpl } from './dependencies'
 import type { PluginLifecycle } from './lifecycle'
 import { createLogger } from './logger'
 import {
@@ -33,6 +34,7 @@ import {
   createProactiveRefreshQueue,
   type ProactiveRefreshQueue,
 } from './refresh-queue'
+import { isGenerativeLanguageRequest } from './request'
 import {
   AccountStorageUnreadableError,
   type AccountStoreOpening,
@@ -40,6 +42,7 @@ import {
   initializeFreshAccountStoreFor,
   loadAccounts,
   openAccountStore,
+  UNMIGRATED_ACCOUNT_MESSAGE,
 } from './storage'
 import { createAntigravityTokenExchange } from './token'
 import type {
@@ -81,9 +84,9 @@ export interface LocalFetchRuntime extends AuthFetchRuntime {
 }
 
 /**
- * The account manager request routing uses for this plugin's account pool:
- * the pool-file manager until that pool is migrated to the account store,
- * then the core manager whose accounts come from the store's repository.
+ * Request routing uses the repository manager for an active account store.
+ * The pool-file manager remains only for the fresh-install compatibility
+ * path; an existing pool cannot serve before explicit offline migration.
  */
 export type RuntimeAccountManager = AccountManager | CoreAccountManager
 
@@ -158,12 +161,9 @@ interface AuthLoaderDependencies {
   isDebugEnabled: typeof isDebugEnabled
   getLogFilePath: typeof getLogFilePath
   /**
-   * Opens the account store (`openAccountStore`). The pool file is loaded
-   * only while the migration has published no store pointer: nothing exists
-   * yet (`initialization-required`) or only the pool file does
-   * (`migration-required`). Once a pointer names a store generation, every
-   * other answer (pending work, rollback, invalid journal or files) stops
-   * the loader; it never falls back to the retired pool file.
+   * Opens the account store (`openAccountStore`). An existing unmigrated pool
+   * makes local requests unavailable without loading the pool. Pending work,
+   * rollback, or invalid store files refuse rather than falling back to it.
    */
   openAccountStore(): Promise<AccountStoreOpening>
 }
@@ -182,16 +182,36 @@ async function openDefaultAccountStore(): Promise<AccountStoreOpening> {
 }
 
 /**
- * Whether the pool file is still the source of the plugin's accounts: the
- * migration has published no store pointer (nothing exists yet, or only the
- * pool file does, awaiting the offline migration). Once a pointer names a
- * store generation, the pool file is never used again, whatever state that
- * store is in.
+ * A fresh installation may still obtain its first account. An existing pool
+ * needs explicit offline migration before local accounts can be used; absence
+ * of a store pointer is not permission to serve or update that pool.
  */
 function usesPoolFile(opening: AccountStoreOpening): boolean {
-  return (
-    opening.status === 'initialization-required' ||
-    opening.status === 'migration-required'
+  return opening.status === 'initialization-required'
+}
+
+async function fetchWithoutLocalAccounts(
+  input: Parameters<LoaderResult['fetch']>[0],
+  init: Parameters<LoaderResult['fetch']>[1],
+  upstreamFetch: FetchImpl,
+): Promise<Response> {
+  if (!isGenerativeLanguageRequest(input)) return upstreamFetch(input, init)
+  const callerSignal =
+    init?.signal !== undefined
+      ? init.signal
+      : input instanceof Request
+        ? input.signal
+        : undefined
+  callerSignal?.throwIfAborted()
+  return Response.json(
+    {
+      error: {
+        code: 412,
+        status: 'FAILED_PRECONDITION',
+        message: UNMIGRATED_ACCOUNT_MESSAGE,
+      },
+    },
+    { status: 412 },
   )
 }
 
@@ -202,6 +222,7 @@ interface CreateAuthLoaderOptions {
   config: AntigravityConfig
   lifecycle: PluginLifecycle
   createFetch: CreateAuthFetch
+  fetchImpl?: FetchImpl
   readAuthority?: () => Promise<EnrollmentAuthority>
   createVaultFetch?: () => Promise<AuthFetchRuntime>
   onGetAuth?(getAuth: GetAuth): void
@@ -215,6 +236,7 @@ export function createAuthLoader({
   config,
   lifecycle,
   createFetch,
+  fetchImpl = (input, init) => globalThis.fetch(input, init),
   readAuthority,
   createVaultFetch,
   onGetAuth,
@@ -271,6 +293,7 @@ export function createAuthLoader({
     if (isClosed()) throw new Error('The account loader is disposed')
   }
   let fetchRuntime: LocalFetchRuntime | null = null
+  let localUnavailable = false
   let vaultFetchRuntime: Promise<AuthFetchRuntime> | null = null
   let currentRequestSource: EnrollmentAuthority | undefined
   let latestGetAuth: GetAuth | undefined
@@ -316,6 +339,7 @@ export function createAuthLoader({
       throw new Error('The account loader is disposed')
     }
     currentRequestSource = 'local'
+    localUnavailable = false
     if (accountManager.getAccountCount() > 0) {
       accountManager.requestSaveToDisk()
     }
@@ -486,6 +510,11 @@ export function createAuthLoader({
 
     const opening = await openStore()
     assertOpen()
+    if (opening.status === 'migration-required') {
+      localUnavailable = true
+      currentRequestSource = 'local'
+      return finishLoad(provider)
+    }
     if (opening.status === 'ready') {
       // This plugin's account pool now comes only from the store's
       // repository; the retired pool file is never read or cleared here.
@@ -634,6 +663,11 @@ export function createAuthLoader({
           assertOpen()
           return vaultRuntime.fetch(input, init)
         }
+        // Check authority first: an approved vault remains usable even when
+        // this location's local pool is waiting for offline migration.
+        if (localUnavailable) {
+          return fetchWithoutLocalAccounts(input, init, fetchImpl)
+        }
         if (
           readAuthority &&
           (localRequestReload ||
@@ -656,6 +690,8 @@ export function createAuthLoader({
             throw new Error(VAULT_ACCOUNT_REMEDY)
           assertOpen()
         }
+        if (localUnavailable)
+          return fetchWithoutLocalAccounts(input, init, fetchImpl)
         if (currentRequestSource !== 'local' || !fetchRuntime)
           throw new Error('The local account runtime is unavailable')
         return fetchRuntime.fetch(input, init)
@@ -673,6 +709,11 @@ export function createAuthLoader({
     if (!isOAuthAuth(auth) && !readAuthority) return
     const opening = await openStore()
     assertOpen()
+    if (opening.status === 'migration-required') {
+      localUnavailable = true
+      currentRequestSource = 'local'
+      return
+    }
     if (opening.status === 'ready') {
       const nextManager = await loadAccountManagerFromRepository(
         opening.repository,

@@ -794,9 +794,9 @@ describe('openAccountStore', () => {
     const { built, options: open } = options()
     const opening = await openAccountStore(open)
     expect(opening.status).toBe('migration-required')
-    expect(
-      opening.status === 'migration-required' ? opening.message : '',
-    ).toContain('`antigravity-auth migrate --offline`')
+    expect(opening.status === 'migration-required' ? opening.message : '').toBe(
+      'Antigravity accounts require offline migration. Stop OpenCode, then run `npx @cortexkit/opencode-antigravity-auth@3.0.0 migrate --offline`.',
+    )
     expect(built).toEqual([])
     expect(await readdir(configDir)).toEqual(before)
   })
