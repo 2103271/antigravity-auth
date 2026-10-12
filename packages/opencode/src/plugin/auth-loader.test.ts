@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it, mock, spyOn } from 'bun:test'
 import {
   mkdtempSync,
   readFileSync,
@@ -102,6 +102,138 @@ const poolFileOnly = async () =>
   ({ status: 'initialization-required' }) as const
 
 describe('createAuthLoader', () => {
+  it('keeps an unmigrated local target unavailable with default producers, preserves passthrough and cancellation, and delegates fresh vault authority', async () => {
+    const { lifecycle, replacements } = createOwnedLifecycle()
+    const loadAccounts = mock(async () => storedAccounts())
+    const clearAccounts = mock(async () => {})
+    const loadAccountManager = mock(async () => {
+      throw new Error('unmigrated manager constructed')
+    })
+    const createRefreshQueue = mock(() => {
+      throw new Error('unmigrated queue constructed')
+    })
+    const createFetch = mock(() => {
+      throw new Error('unmigrated interceptor constructed')
+    })
+    const openAccountStore = mock(
+      async () =>
+        ({
+          status: 'migration-required',
+          message: 'not a trusted request message',
+        }) as const,
+    )
+    const vaultFetch = mock(async () => new Response('approved-vault'))
+    const passthrough = spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('unrelated-response'),
+    )
+    let authority: EnrollmentAuthority = 'local'
+    const getAuth = mock(async () => ({
+      type: 'oauth' as const,
+      access: 'synthetic-access',
+      refresh: 'synthetic-refresh',
+      expires: Date.now() + 3600000,
+    }))
+    const loader = createAuthLoader({
+      client: { tui: { showToast: mock(async () => {}) } } as never,
+      providerId: 'google',
+      config: DEFAULT_CONFIG,
+      lifecycle,
+      readAuthority: async () => authority,
+      createFetch,
+      createVaultFetch: async () => ({ fetch: vaultFetch, dispose() {} }),
+      dependencies: {
+        openAccountStore,
+        loadAccounts,
+        clearAccounts,
+        loadAccountManager,
+        createRefreshQueue,
+        isDebugEnabled: () => false,
+      },
+    })
+    try {
+      const loaded = await loader(getAuth, { models: {} } as never)
+      if (typeof loaded.fetch !== 'function')
+        throw new Error('no delegating fetch')
+      for (const input of [
+        'https://generativelanguage.googleapis.com/v1/models/test:streamGenerateContent',
+        new URL(
+          'https://generativelanguage.googleapis.com/v1/models/test:streamGenerateContent',
+        ),
+        new Request(
+          'https://generativelanguage.googleapis.com/v1/models/test:streamGenerateContent',
+        ),
+      ]) {
+        const response = await loaded.fetch(input)
+        expect(response.status).toBe(412)
+        expect(await response.json()).toEqual({
+          error: {
+            code: 412,
+            status: 'FAILED_PRECONDITION',
+            message:
+              'Antigravity accounts require offline migration. Stop OpenCode, then run `npx @cortexkit/opencode-antigravity-auth@3.0.0 migrate --offline`.',
+          },
+        })
+      }
+      expect(passthrough).not.toHaveBeenCalled()
+      const init = { headers: { 'x-test': 'unchanged' } }
+      expect(
+        await (
+          await loaded.fetch('https://example.invalid/non-generative', init)
+        ).text(),
+      ).toBe('unrelated-response')
+      expect(passthrough).toHaveBeenCalledWith(
+        'https://example.invalid/non-generative',
+        init,
+      )
+      const abort = new AbortController()
+      const cancellation = new Error('caller-cancelled')
+      abort.abort(cancellation)
+      await expect(
+        loaded.fetch('https://generativelanguage.googleapis.com/example', {
+          signal: abort.signal,
+        }),
+      ).rejects.toBe(cancellation)
+      await expect(
+        loaded.fetch(
+          new Request('https://generativelanguage.googleapis.com/example', {
+            signal: abort.signal,
+          }),
+        ),
+      ).rejects.toBe(cancellation)
+      await loader.reload(getAuth)
+      authority = 'vault'
+      expect(
+        await (
+          await loaded.fetch(
+            'https://generativelanguage.googleapis.com/example',
+          )
+        ).text(),
+      ).toBe('approved-vault')
+      expect(vaultFetch).toHaveBeenCalledTimes(1)
+      authority = 'local'
+      expect(
+        (
+          await loaded.fetch(
+            'https://generativelanguage.googleapis.com/example',
+          )
+        ).status,
+      ).toBe(412)
+      expect(openAccountStore).toHaveBeenCalledTimes(1)
+      expect(loadAccounts).not.toHaveBeenCalled()
+      expect(clearAccounts).not.toHaveBeenCalled()
+      expect(loadAccountManager).not.toHaveBeenCalled()
+      expect(createRefreshQueue).not.toHaveBeenCalled()
+      expect(createFetch).not.toHaveBeenCalled()
+      expect(replacements).toEqual([])
+      await lifecycle.dispose()
+      await expect(
+        loaded.fetch('https://generativelanguage.googleapis.com/example'),
+      ).rejects.toThrow('The account loader is disposed')
+    } finally {
+      passthrough.mockRestore()
+      await lifecycle.dispose()
+    }
+  })
   for (const heldDrain of ['request', 'queue'] as const) {
     it(`refuses new vault admission while final shutdown holds the ${heldDrain} drain`, async () => {
       const requestHeld = deferred()
@@ -1248,7 +1380,7 @@ describe('createAuthLoader on the account store', () => {
     expect(replacements).toEqual([])
     expect(
       loader.usesPoolFile({ status: 'migration-required', message: '' }),
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it('refuses to start while a migration is pending, without falling back to the pool file', async () => {

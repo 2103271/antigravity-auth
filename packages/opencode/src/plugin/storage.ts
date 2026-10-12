@@ -398,6 +398,8 @@ export async function assertLegacyPoolInUse(legacyPath: string): Promise<void> {
 
 /** Offline commands the messages below name. */
 const MIGRATE_COMMAND = 'antigravity-auth migrate --offline'
+export const UNMIGRATED_ACCOUNT_MESSAGE =
+  'Antigravity accounts require offline migration. Stop OpenCode, then run `npx @cortexkit/opencode-antigravity-auth@3.0.0 migrate --offline`.'
 const ROLLBACK_COMMAND = 'antigravity-auth rollback --offline'
 
 type NotServing = Exclude<
@@ -499,7 +501,7 @@ function unboundOpening(
   ) {
     return {
       status: 'migration-required',
-      message: `Accounts must be moved to the account store; stop every Antigravity process and run \`${MIGRATE_COMMAND}\`.`,
+      message: UNMIGRATED_ACCOUNT_MESSAGE,
     }
   }
   return {
